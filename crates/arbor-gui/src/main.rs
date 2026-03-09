@@ -34,10 +34,10 @@ use {
         DragMoveEvent, ElementId, ElementInputHandler, EntityInputHandler, FocusHandle,
         FontFallbacks, FontFeatures, FontWeight, Image, ImageFormat, KeyBinding, KeyDownEvent,
         Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-        PathPromptOptions, Pixels, ScrollHandle, ScrollStrategy, Stateful, SystemMenuType, TextRun,
-        TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window, WindowBounds,
-        WindowControlArea, WindowDecorations, WindowOptions, actions, canvas, div, ease_in_out,
-        fill, font, img, point, prelude::*, px, rgb, size, uniform_list,
+        PathPromptOptions, Pixels, ScrollHandle, ScrollStrategy, SharedString, Stateful,
+        SystemMenuType, TextRun, TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window,
+        WindowBounds, WindowControlArea, WindowDecorations, WindowOptions, actions, canvas, div,
+        ease_in_out, fill, font, img, point, prelude::*, px, rgb, size, uniform_list,
     },
     ropey::Rope,
     std::{
@@ -1704,24 +1704,40 @@ struct ArborWindow {
     welcome_clone_url_active: bool,
     welcome_cloning: bool,
     welcome_clone_error: Option<String>,
+    /// When set, the window connects to this remote daemon after initialization.
+    pending_daemon_connection: Option<PendingDaemonConnection>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDaemonConnection {
+    url: String,
+    label: Option<String>,
 }
 
 impl ArborWindow {
     fn load_with_daemon_store<S>(
         startup_ui_state: ui_state_store::UiState,
         log_buffer: log_layer::LogBuffer,
+        pending_daemon: Option<PendingDaemonConnection>,
         cx: &mut Context<Self>,
     ) -> Self
     where
         S: daemon::DaemonSessionStore + Default + 'static,
     {
-        Self::load(Box::new(S::default()), startup_ui_state, log_buffer, cx)
+        Self::load(
+            Box::new(S::default()),
+            startup_ui_state,
+            log_buffer,
+            pending_daemon,
+            cx,
+        )
     }
 
     fn load(
         daemon_session_store: Box<dyn daemon::DaemonSessionStore>,
         startup_ui_state: ui_state_store::UiState,
         log_buffer: log_layer::LogBuffer,
+        pending_daemon: Option<PendingDaemonConnection>,
         cx: &mut Context<Self>,
     ) -> Self {
         let app_config_store = app_config::default_app_config_store();
@@ -1934,6 +1950,7 @@ impl ArborWindow {
                     welcome_clone_url_active: false,
                     welcome_cloning: false,
                     welcome_clone_error: None,
+                    pending_daemon_connection: None,
                 };
 
                 return app;
@@ -2242,6 +2259,7 @@ impl ArborWindow {
             welcome_clone_url_active: false,
             welcome_cloning: false,
             welcome_clone_error: None,
+            pending_daemon_connection: pending_daemon,
         };
 
         app.refresh_worktrees(cx);
@@ -2258,6 +2276,12 @@ impl ArborWindow {
         app.start_mdns_browser(cx);
         app.ensure_claude_code_hooks(cx);
         app.ensure_pi_agent_extension(cx);
+
+        if let Some(pending) = app.pending_daemon_connection.take() {
+            tracing::info!(url = %pending.url, label = ?pending.label, "connecting to pending remote daemon");
+            app.connect_to_daemon_url(&pending.url, pending.label, cx);
+        }
+
         app
     }
 
@@ -4780,12 +4804,51 @@ impl ArborWindow {
             name = %label,
             host = %daemon.host,
             has_auth = daemon.has_auth,
-            "connecting to discovered LAN daemon"
+            "opening new window for discovered LAN daemon"
         );
         connection_history::record_connection(&url, Some(&label));
         self.connection_history = connection_history::load_history();
-        self.connect_to_daemon_url(&url, Some(label), cx);
-        self.active_discovered_daemon = Some(index);
+
+        let pending = PendingDaemonConnection {
+            url,
+            label: Some(label.clone()),
+        };
+        let title: SharedString = format!("Arbor — {label}").into();
+        cx.spawn(async move |_this, cx| {
+            let result = cx.update(|cx| {
+                let bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        window_min_size: Some(size(px(1180.), px(760.))),
+                        app_id: Some("so.pen.arbor".to_owned()),
+                        titlebar: Some(TitlebarOptions {
+                            title: Some(title),
+                            appears_transparent: true,
+                            traffic_light_position: Some(point(px(9.), px(9.))),
+                        }),
+                        window_decorations: Some(WindowDecorations::Client),
+                        ..Default::default()
+                    },
+                    |_window: &mut Window, cx: &mut App| {
+                        cx.new(|cx| {
+                            ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
+                                ui_state_store::UiState::default(),
+                                log_layer::LogBuffer::new(),
+                                Some(pending),
+                                cx,
+                            )
+                        })
+                    },
+                )
+            });
+            match result {
+                Ok(Ok(_)) => {},
+                Ok(Err(error)) => tracing::error!(%error, "failed to open window for LAN daemon"),
+                Err(error) => tracing::error!(%error, "failed to update app for LAN daemon window"),
+            }
+        })
+        .detach();
     }
 
     fn connect_to_daemon_url(&mut self, url: &str, label: Option<String>, cx: &mut Context<Self>) {
@@ -21476,12 +21539,13 @@ fn open_arbor_window(cx: &mut App) {
                 ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
                     ui_state_store::UiState::default(),
                     log_layer::LogBuffer::new(),
+                    None,
                     cx,
                 )
             })
         },
     ) {
-        eprintln!("failed to open Arbor window: {error:#}");
+        tracing::error!(%error, "failed to open Arbor window");
     }
 }
 
@@ -21879,6 +21943,7 @@ fn main() {
                     ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
                         startup_ui_state,
                         log_buffer,
+                        None,
                         cx,
                     )
                 })
