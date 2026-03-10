@@ -60,6 +60,7 @@ const HTTPD_VERSION: &str = match option_env!("ARBOR_VERSION") {
 };
 
 const AGENT_SESSION_EXPIRY_SECS: u64 = 300;
+const LOG_BROADCAST_CAPACITY: usize = 256;
 
 /// Cached PR lookup result with expiry.
 #[derive(Clone)]
@@ -89,6 +90,7 @@ struct AppState {
     github_service: Arc<dyn GitHubPrService>,
     agent_sessions: Arc<Mutex<HashMap<String, AgentSession>>>,
     agent_broadcast: tokio::sync::broadcast::Sender<AgentWsEvent>,
+    log_broadcast: tokio::sync::broadcast::Sender<String>,
     pr_cache: Arc<Mutex<HashMap<String, PrCacheEntry>>>,
     repo_cache: Arc<Mutex<HashMap<String, RepoCacheEntry>>>,
     shutdown_signal: Arc<tokio::sync::Notify>,
@@ -243,6 +245,24 @@ fn ensure_auth_token(config: &mut DaemonConfig) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Set up tracing with a broadcast layer so logs can be streamed to the GUI.
+    let (log_broadcast, _) =
+        tokio::sync::broadcast::channel::<String>(LOG_BROADCAST_CAPACITY);
+    {
+        use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
+        let env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info"));
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_filter(env_filter);
+        let broadcast_layer = BroadcastLogLayer {
+            sender: log_broadcast.clone(),
+        };
+        tracing_subscriber::registry()
+            .with(fmt_layer)
+            .with(broadcast_layer)
+            .init();
+    }
+
     let web_ui_result = ensure_web_ui_assets();
     if let Err(error) = &web_ui_result {
         eprintln!("web-ui build skipped: {error}");
@@ -297,6 +317,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         github_service: github_service::default_github_pr_service(),
         agent_sessions: Arc::new(Mutex::new(HashMap::new())),
         agent_broadcast,
+        log_broadcast,
         pr_cache: Arc::new(Mutex::new(HashMap::new())),
         repo_cache: Arc::new(Mutex::new(HashMap::new())),
         shutdown_signal: Arc::new(tokio::sync::Notify::new()),
@@ -451,7 +472,8 @@ fn router(state: AppState) -> Router {
         .route("/processes/{name}/restart", post(restart_process))
         .route("/processes/ws", get(process_status_ws))
         .route("/shutdown", post(shutdown_daemon))
-        .route("/config/bind", post(set_bind_mode).get(get_bind_mode));
+        .route("/config/bind", post(set_bind_mode).get(get_bind_mode))
+        .route("/logs/ws", get(logs_ws));
 
     let with_state = Router::new().nest("/api/v1", api).with_state(state);
 
@@ -1199,10 +1221,22 @@ async fn agent_notify(
     State(state): State<AppState>,
     Json(request): Json<AgentNotifyRequest>,
 ) -> StatusCode {
+    tracing::info!(
+        hook_event = request.hook_event_name.as_str(),
+        session_id = request.session_id.as_str(),
+        cwd = request.cwd.as_str(),
+        "agent notify received"
+    );
     let agent_state = match request.hook_event_name.as_str() {
         "UserPromptSubmit" => AgentState::Working,
         "Stop" => AgentState::Waiting,
-        _ => return StatusCode::OK,
+        _ => {
+            tracing::info!(
+                hook_event = request.hook_event_name.as_str(),
+                "agent notify ignored: unknown hook event"
+            );
+            return StatusCode::OK;
+        },
     };
 
     let now_ms = SystemTime::now()
@@ -1233,6 +1267,11 @@ async fn agent_notify(
         }
     };
 
+    tracing::info!(
+        cwd = dto.cwd.as_str(),
+        state = dto.state.as_str(),
+        "agent session updated, broadcasting"
+    );
     let _ = state
         .agent_broadcast
         .send(AgentWsEvent::Update { session: dto });
@@ -1872,6 +1911,126 @@ async fn handle_process_status_ws(state: AppState, mut socket: WebSocket) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Log streaming to GUI
+// ---------------------------------------------------------------------------
+
+/// A tracing layer that formats each event as a single-line string and
+/// broadcasts it over a tokio channel.  Receivers that fall behind simply
+/// skip missed entries (lagged), so a slow GUI client never blocks the
+/// daemon.
+struct BroadcastLogLayer {
+    sender: tokio::sync::broadcast::Sender<String>,
+}
+
+impl<S> tracing_subscriber::Layer<S> for BroadcastLogLayer
+where
+    S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+        let metadata = event.metadata();
+        let mut visitor = LogFieldVisitor::default();
+        event.record(&mut visitor);
+
+        let level = match *metadata.level() {
+            tracing::Level::ERROR => "ERROR",
+            tracing::Level::WARN => "WARN",
+            tracing::Level::INFO => "INFO",
+            tracing::Level::DEBUG => "DEBUG",
+            tracing::Level::TRACE => "TRACE",
+        };
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let ts_ms = now.as_millis() as u64;
+
+        let fields_str = if visitor.fields.is_empty() {
+            String::new()
+        } else {
+            let parts: Vec<String> = visitor
+                .fields
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            format!(" {}", parts.join(" "))
+        };
+
+        let line = serde_json::json!({
+            "ts": ts_ms,
+            "level": level,
+            "target": metadata.target(),
+            "message": visitor.message,
+            "fields": fields_str.trim(),
+        });
+
+        // Fire-and-forget — if no receivers are listening, this is a no-op.
+        let _ = self.sender.send(line.to_string());
+    }
+}
+
+#[derive(Default)]
+struct LogFieldVisitor {
+    message: String,
+    fields: Vec<(String, String)>,
+}
+
+impl tracing::field::Visit for LogFieldVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        } else {
+            self.fields
+                .push((field.name().to_owned(), format!("{value:?}")));
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message = value.to_owned();
+        } else {
+            self.fields
+                .push((field.name().to_owned(), value.to_owned()));
+        }
+    }
+}
+
+async fn logs_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| handle_logs_ws(state, socket))
+        .into_response()
+}
+
+async fn handle_logs_ws(state: AppState, mut socket: WebSocket) {
+    let mut rx = state.log_broadcast.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(line) => {
+                if socket
+                    .send(Message::Text(line.into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            },
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                // Tell the client entries were skipped, then continue.
+                let msg = serde_json::json!({
+                    "ts": current_unix_timestamp_millis(),
+                    "level": "WARN",
+                    "target": "arbor_httpd",
+                    "message": format!("log stream lagged, skipped {n} entries"),
+                    "fields": "",
+                });
+                let _ = socket
+                    .send(Message::Text(msg.to_string().into()))
+                    .await;
+            },
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {super::*, crate::repository_store::JsonRepositoryStore, std::time::Duration};
@@ -1973,6 +2132,7 @@ mod tests {
             repo_root.join("repositories.json"),
         ));
         let (agent_broadcast, _) = tokio::sync::broadcast::channel(16);
+        let (log_broadcast, _) = tokio::sync::broadcast::channel(16);
 
         AppState {
             repository_store,
@@ -1981,6 +2141,7 @@ mod tests {
             github_service: github_service::default_github_pr_service(),
             agent_sessions: Arc::new(Mutex::new(HashMap::new())),
             agent_broadcast,
+            log_broadcast,
             pr_cache: Arc::new(Mutex::new(HashMap::new())),
             repo_cache: Arc::new(Mutex::new(HashMap::new())),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),

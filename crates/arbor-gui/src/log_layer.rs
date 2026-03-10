@@ -51,7 +51,7 @@ impl LogBuffer {
             .unwrap_or_default()
     }
 
-    fn push(&self, entry: LogEntry) {
+    pub fn push(&self, entry: LogEntry) {
         if let Ok(mut inner) = self.inner.lock() {
             if inner.entries.len() >= MAX_LOG_ENTRIES {
                 inner.entries.pop_front();

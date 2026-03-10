@@ -1398,6 +1398,7 @@ struct CreateModal {
     outpost_active_field: CreateOutpostField,
     // Shared
     is_creating: bool,
+    creating_status: Option<String>,
     error: Option<String>,
 }
 
@@ -2322,6 +2323,7 @@ impl ArborWindow {
         app.start_github_pr_auto_refresh(cx);
         app.start_config_auto_refresh(cx);
         app.start_agent_activity_ws(cx);
+        app.start_daemon_log_ws(cx);
         app.start_mdns_browser(cx);
         app.ensure_claude_code_hooks(cx);
         app.ensure_pi_agent_extension(cx);
@@ -3329,6 +3331,93 @@ impl ArborWindow {
                 }
 
                 tracing::debug!("agent activity WS disconnected, will retry");
+
+                cx.background_spawn(async move {
+                    std::thread::sleep(Duration::from_secs(backoff_secs));
+                })
+                .await;
+                backoff_secs = (backoff_secs * 2).min(30);
+            }
+        })
+        .detach();
+    }
+
+    fn start_daemon_log_ws(&mut self, cx: &mut Context<Self>) {
+        let daemon_base_url = self.daemon_base_url.clone();
+        let daemon = self.terminal_daemon.clone();
+        let log_buffer = self.log_buffer.clone();
+        cx.spawn(async move |_this, cx| {
+            let mut backoff_secs = 3u64;
+
+            loop {
+                let connect_config = daemon
+                    .as_ref()
+                    .and_then(|daemon| {
+                        daemon
+                            .websocket_connect_config("/api/v1/logs/ws")
+                            .ok()
+                    })
+                    .or_else(|| {
+                        daemon_url_is_local(&daemon_base_url).then(|| {
+                            terminal_daemon_http::WebsocketConnectConfig {
+                                url: daemon_base_url
+                                    .replace("http://", "ws://")
+                                    .replace("https://", "wss://")
+                                    + "/api/v1/logs/ws",
+                                auth_token: None,
+                            }
+                        })
+                    });
+                let (tx, rx) = smol::channel::unbounded::<Option<String>>();
+
+                cx.background_spawn(async move {
+                    let Some(connect_config) = connect_config else {
+                        let _ = tx.send(None).await;
+                        return;
+                    };
+                    let request = match daemon_websocket_request(&connect_config) {
+                        Ok(request) => request,
+                        Err(_) => {
+                            let _ = tx.send(None).await;
+                            return;
+                        },
+                    };
+
+                    let Ok((mut ws, _)) = tungstenite::connect(request) else {
+                        let _ = tx.send(None).await;
+                        return;
+                    };
+                    loop {
+                        match ws.read() {
+                            Ok(tungstenite::Message::Text(text)) => {
+                                if tx.send(Some(text.to_string())).await.is_err() {
+                                    break;
+                                }
+                            },
+                            Ok(tungstenite::Message::Ping(_))
+                            | Ok(tungstenite::Message::Pong(_)) => {},
+                            Ok(tungstenite::Message::Close(_)) | Err(_) => {
+                                let _ = tx.send(None).await;
+                                break;
+                            },
+                            _ => {},
+                        }
+                    }
+                })
+                .detach();
+
+                let first = rx.recv().await;
+                if let Ok(Some(text)) = first {
+                    tracing::info!("daemon log WS connected");
+                    backoff_secs = 3;
+                    inject_daemon_log_entry(&log_buffer, &text);
+
+                    while let Ok(Some(text)) = rx.recv().await {
+                        inject_daemon_log_entry(&log_buffer, &text);
+                    }
+                }
+
+                tracing::debug!("daemon log WS disconnected, will retry");
 
                 cx.background_spawn(async move {
                     std::thread::sleep(Duration::from_secs(backoff_secs));
@@ -5846,6 +5935,7 @@ impl ArborWindow {
             outpost_name_cursor: 0,
             outpost_active_field: CreateOutpostField::CloneUrl,
             is_creating: false,
+            creating_status: None,
             error: None,
         });
         cx.notify();
@@ -6193,6 +6283,7 @@ impl ArborWindow {
                         tracing::error!("worktree creation failed: {error}");
                         if let Some(modal) = this.create_modal.as_mut() {
                             modal.is_creating = false;
+                            modal.creating_status = None;
                             modal.error = Some(error);
                         } else {
                             this.notice = Some(error);
@@ -6868,6 +6959,7 @@ impl ArborWindow {
         let branch = derive_branch_name(&outpost_name);
 
         modal.is_creating = true;
+        modal.creating_status = Some("Connecting over SSH…".to_owned());
         cx.notify();
 
         let local_repo_root = self
@@ -6880,9 +6972,18 @@ impl ArborWindow {
         let bg_outpost_name = outpost_name.clone();
         let bg_branch = branch.clone();
 
+        // Channel carries either a progress status (Left) or the final result (Right).
+        enum ProvisionMsg {
+            Progress(String),
+            Done(Result<arbor_core::remote::ProvisionResult, String>),
+        }
+
+        let (msg_tx, msg_rx) = smol::channel::unbounded::<ProvisionMsg>();
+
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
+            // Spawn the provisioning work on a background thread.
+            cx.background_spawn(async move {
+                let result = (|| {
                     let conn_slot = pool
                         .get_or_connect(&host)
                         .map_err(|e| format!("SSH connection failed: {e}"))?;
@@ -6894,12 +6995,41 @@ impl ArborWindow {
                         .ok_or_else(|| "SSH connection not available".to_owned())?;
                     let provisioner =
                         arbor_ssh::provisioner::SshProvisioner::new(connection, &host);
-                    use arbor_core::remote::RemoteProvisioner;
                     provisioner
-                        .provision(&bg_clone_url, &bg_outpost_name, &bg_branch)
+                        .provision_with_progress(
+                            &bg_clone_url,
+                            &bg_outpost_name,
+                            &bg_branch,
+                            |status| {
+                                let _ = msg_tx.send_blocking(ProvisionMsg::Progress(
+                                    status.to_owned(),
+                                ));
+                            },
+                        )
                         .map_err(|e| format!("{e}"))
-                })
-                .await;
+                })();
+                let _ = msg_tx.send_blocking(ProvisionMsg::Done(result));
+            })
+            .detach();
+
+            // Read messages until we get the final result.
+            let mut result = Err("provisioning task was cancelled".to_owned());
+            while let Ok(msg) = msg_rx.recv().await {
+                match msg {
+                    ProvisionMsg::Progress(status) => {
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(modal) = this.create_modal.as_mut() {
+                                modal.creating_status = Some(status);
+                            }
+                            cx.notify();
+                        });
+                    },
+                    ProvisionMsg::Done(r) => {
+                        result = r;
+                        break;
+                    },
+                }
+            }
 
             let _ = this.update(cx, |this, cx| {
                 match result {
@@ -6923,12 +7053,21 @@ impl ArborWindow {
                         }
                         this.outposts =
                             load_outpost_summaries(this.outpost_store.as_ref(), &this.remote_hosts);
+                        // Select the newly created outpost in the sidebar.
+                        let new_index = this
+                            .outposts
+                            .iter()
+                            .position(|o| o.label == outpost_name && o.host_name == host_name);
+                        if let Some(idx) = new_index {
+                            this.active_outpost_index = Some(idx);
+                        }
                         this.create_modal = None;
                     },
                     Err(error) => {
                         tracing::error!("outpost creation failed: {error}");
                         if let Some(modal) = this.create_modal.as_mut() {
                             modal.is_creating = false;
+                            modal.creating_status = None;
                             modal.error = Some(error);
                         } else {
                             this.notice = Some(error);
@@ -8690,8 +8829,14 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.quit_overlay_until.is_some() {
+            // The quit overlay is modal — suppress terminal input entirely so
+            // the key event propagates up to handle_global_key_down which
+            // handles Enter/Escape for the overlay.
+            return;
+        }
+
         if self.right_pane_search_active
-            || self.quit_overlay_until.is_some()
             || self.create_modal.is_some()
             || self.settings_modal.is_some()
             || self.github_auth_modal.is_some()
@@ -12629,12 +12774,16 @@ impl ArborWindow {
         } else {
             outpost_create_disabled
         };
-        let submit_label = if modal.is_creating {
-            "Creating..."
+        let creating_status = modal.creating_status.clone();
+        let submit_label: String = if modal.is_creating {
+            creating_status
+                .as_deref()
+                .unwrap_or("Creating…")
+                .to_owned()
         } else if is_worktree_tab {
-            checkout_kind.action_label()
+            checkout_kind.action_label().to_owned()
         } else {
-            "Create Outpost"
+            "Create Outpost".to_owned()
         };
 
         div()
@@ -17402,6 +17551,10 @@ impl EntityInputHandler for ArborWindow {
             cx.notify();
             return;
         }
+        // Suppress all text input while the quit overlay is showing.
+        if self.quit_overlay_until.is_some() {
+            return;
+        }
         // When a modal with a text field is open, route IME text there instead
         if let Some(ref mut modal) = self.daemon_auth_modal {
             modal.token.push_str(text);
@@ -17794,6 +17947,51 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, 
             );
         }
     }
+}
+
+fn inject_daemon_log_entry(log_buffer: &log_layer::LogBuffer, text: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return;
+    };
+    let level = match value.get("level").and_then(|v| v.as_str()).unwrap_or("INFO") {
+        "ERROR" => tracing::Level::ERROR,
+        "WARN" => tracing::Level::WARN,
+        "DEBUG" => tracing::Level::DEBUG,
+        "TRACE" => tracing::Level::TRACE,
+        _ => tracing::Level::INFO,
+    };
+    let target = value
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("arbor_httpd");
+    let message = value
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let fields_str = value
+        .get("fields")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let ts_ms = value.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
+    let timestamp = SystemTime::UNIX_EPOCH + Duration::from_millis(ts_ms);
+
+    let mut fields = Vec::new();
+    if !fields_str.is_empty() {
+        for part in fields_str.split(' ') {
+            if let Some((k, v)) = part.split_once('=') {
+                fields.push((k.to_owned(), v.to_owned()));
+            }
+        }
+    }
+
+    log_buffer.push(log_layer::LogEntry {
+        timestamp,
+        level,
+        target: format!("[daemon] {target}"),
+        message,
+        fields,
+    });
 }
 
 fn install_claude_code_hooks(daemon_base_url: &str) -> Result<(), String> {
