@@ -6939,7 +6939,7 @@ impl ArborWindow {
     fn handle_global_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if event.is_held {
@@ -6991,6 +6991,22 @@ impl ArborWindow {
                 );
                 cx.notify();
                 cx.stop_propagation();
+            }
+            return;
+        }
+
+        if self.quit_overlay_until.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.quit_overlay_until = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                },
+                "enter" | "return" => {
+                    self.action_confirm_quit(window, cx);
+                    cx.stop_propagation();
+                },
+                _ => {},
             }
             return;
         }
