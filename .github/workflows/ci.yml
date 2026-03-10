@@ -65,6 +65,14 @@ jobs:
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
           components: clippy
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libavahi-client-dev
       - run: just lint
 
   test:
@@ -82,13 +90,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
-      - name: Install Linux GUI dependencies
+      - name: Install Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libxcb1-dev \
             libxkbcommon-dev \
-            libxkbcommon-x11-dev
+            libxkbcommon-x11-dev \
+            libavahi-client-dev
       - run: just test
 
   build-matrix:
@@ -124,14 +133,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
-      - name: Install Linux x86_64 GUI dependencies
+      - name: Install Linux x86_64 dependencies
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libxcb1-dev \
             libxkbcommon-dev \
-            libxkbcommon-x11-dev
+            libxkbcommon-x11-dev \
+            libavahi-client-dev
       - name: Install Linux ARM64 toolchain and GUI dependencies
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -158,7 +168,8 @@ jobs:
             libxkbcommon-dev:arm64 \
             libxkbcommon-x11-dev:arm64 \
             libssl-dev:arm64 \
-            zlib1g-dev:arm64
+            zlib1g-dev:arm64 \
+            libavahi-client-dev:arm64
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
       - name: Build arbor-gui (linux arm64)

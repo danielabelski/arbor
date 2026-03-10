@@ -80,7 +80,8 @@ jobs:
           sudo apt-get install -y \
             libxcb1-dev \
             libxkbcommon-dev \
-            libxkbcommon-x11-dev
+            libxkbcommon-x11-dev \
+            libavahi-client-dev
       - run: just test
 
   build-macos:
@@ -272,7 +273,8 @@ jobs:
           sudo apt-get install -y \
             libxcb1-dev \
             libxkbcommon-dev \
-            libxkbcommon-x11-dev
+            libxkbcommon-x11-dev \
+            libavahi-client-dev
       - name: Install Linux ARM64 toolchain and GUI dependencies
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -299,7 +301,8 @@ jobs:
             libxkbcommon-dev:arm64 \
             libxkbcommon-x11-dev:arm64 \
             libssl-dev:arm64 \
-            zlib1g-dev:arm64
+            zlib1g-dev:arm64 \
+            libavahi-client-dev:arm64
       - name: Add Rust target
         shell: bash
         env:
