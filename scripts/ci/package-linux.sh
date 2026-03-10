@@ -17,6 +17,11 @@ ARCHIVE_PATH="${OUTPUT_DIR}/${APP_NAME}-${TAG}-${TARGET_TRIPLE}.tar.gz"
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 
+is_lfs_pointer() {
+  local path="$1"
+  [[ -f "$path" ]] && head -n 1 "$path" | grep -Fqx 'version https://git-lfs.github.com/spec/v1'
+}
+
 mkdir -p "${STAGING_DIR}/bin" "${STAGING_DIR}/share/arbor"
 install -m 0755 "${BINARY_PATH}" "${STAGING_DIR}/bin/${APP_NAME}"
 cp README.md "${STAGING_DIR}/README.md"
@@ -52,6 +57,12 @@ fi
 FONTS_DIR="${ROOT_DIR}/assets/fonts"
 if [[ -d "${FONTS_DIR}" ]]; then
   mkdir -p "${STAGING_DIR}/share/arbor/fonts"
+  for font_path in "${FONTS_DIR}"/*.ttf; do
+    if is_lfs_pointer "${font_path}"; then
+      echo "error: font asset is a Git LFS pointer, run 'git lfs pull': ${font_path}" >&2
+      exit 1
+    fi
+  done
   cp "${FONTS_DIR}"/*.ttf "${STAGING_DIR}/share/arbor/fonts/"
   echo "bundled fonts from ${FONTS_DIR}"
 else

@@ -246,14 +246,12 @@ fn ensure_auth_token(config: &mut DaemonConfig) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set up tracing with a broadcast layer so logs can be streamed to the GUI.
-    let (log_broadcast, _) =
-        tokio::sync::broadcast::channel::<String>(LOG_BROADCAST_CAPACITY);
+    let (log_broadcast, _) = tokio::sync::broadcast::channel::<String>(LOG_BROADCAST_CAPACITY);
     {
         use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
-        let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info"));
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_filter(env_filter);
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
         let broadcast_layer = BroadcastLogLayer {
             sender: log_broadcast.clone(),
         };
@@ -1927,7 +1925,11 @@ impl<S> tracing_subscriber::Layer<S> for BroadcastLogLayer
 where
     S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
 {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
         let metadata = event.metadata();
         let mut visitor = LogFieldVisitor::default();
         event.record(&mut visitor);
@@ -2005,11 +2007,7 @@ async fn handle_logs_ws(state: AppState, mut socket: WebSocket) {
     loop {
         match rx.recv().await {
             Ok(line) => {
-                if socket
-                    .send(Message::Text(line.into()))
-                    .await
-                    .is_err()
-                {
+                if socket.send(Message::Text(line.into())).await.is_err() {
                     break;
                 }
             },
@@ -2022,9 +2020,7 @@ async fn handle_logs_ws(state: AppState, mut socket: WebSocket) {
                     "message": format!("log stream lagged, skipped {n} entries"),
                     "fields": "",
                 });
-                let _ = socket
-                    .send(Message::Text(msg.to_string().into()))
-                    .await;
+                let _ = socket.send(Message::Text(msg.to_string().into())).await;
             },
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }

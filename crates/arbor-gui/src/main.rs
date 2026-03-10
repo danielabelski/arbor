@@ -3352,11 +3352,7 @@ impl ArborWindow {
             loop {
                 let connect_config = daemon
                     .as_ref()
-                    .and_then(|daemon| {
-                        daemon
-                            .websocket_connect_config("/api/v1/logs/ws")
-                            .ok()
-                    })
+                    .and_then(|daemon| daemon.websocket_connect_config("/api/v1/logs/ws").ok())
                     .or_else(|| {
                         daemon_url_is_local(&daemon_base_url).then(|| {
                             terminal_daemon_http::WebsocketConnectConfig {
@@ -7001,9 +6997,8 @@ impl ArborWindow {
                             &bg_outpost_name,
                             &bg_branch,
                             |status| {
-                                let _ = msg_tx.send_blocking(ProvisionMsg::Progress(
-                                    status.to_owned(),
-                                ));
+                                let _ =
+                                    msg_tx.send_blocking(ProvisionMsg::Progress(status.to_owned()));
                             },
                         )
                         .map_err(|e| format!("{e}"))
@@ -12776,10 +12771,7 @@ impl ArborWindow {
         };
         let creating_status = modal.creating_status.clone();
         let submit_label: String = if modal.is_creating {
-            creating_status
-                .as_deref()
-                .unwrap_or("Creating…")
-                .to_owned()
+            creating_status.as_deref().unwrap_or("Creating…").to_owned()
         } else if is_worktree_tab {
             checkout_kind.action_label().to_owned()
         } else {
@@ -17866,10 +17858,7 @@ fn process_agent_ws_message(
                     Some((cwd.to_owned(), state, updated_at))
                 })
                 .collect();
-            tracing::info!(
-                count = entries.len(),
-                "agent WS snapshot received"
-            );
+            tracing::info!(count = entries.len(), "agent WS snapshot received");
             for (cwd, state, _) in &entries {
                 tracing::info!(cwd = cwd.as_str(), ?state, "  snapshot entry");
             }
@@ -17883,11 +17872,7 @@ fn process_agent_ws_message(
                 let cwd = session.get("cwd").and_then(|v| v.as_str());
                 let state_str = session.get("state").and_then(|v| v.as_str());
                 if let (Some(cwd), Some(state_str)) = (cwd, state_str) {
-                    tracing::info!(
-                        cwd,
-                        state = state_str,
-                        "agent WS update received"
-                    );
+                    tracing::info!(cwd, state = state_str, "agent WS update received");
                     let state = match state_str {
                         "working" => AgentState::Working,
                         "waiting" => AgentState::Waiting,
@@ -17907,7 +17892,10 @@ fn process_agent_ws_message(
 }
 
 fn apply_agent_ws_snapshot(app: &mut ArborWindow, entries: &[(String, AgentState, Option<u64>)]) {
-    tracing::info!(count = entries.len(), "agent WS snapshot: resetting all worktree states");
+    tracing::info!(
+        count = entries.len(),
+        "agent WS snapshot: resetting all worktree states"
+    );
     for worktree in &mut app.worktrees {
         worktree.agent_state = None;
     }
@@ -17953,7 +17941,11 @@ fn inject_daemon_log_entry(log_buffer: &log_layer::LogBuffer, text: &str) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
-    let level = match value.get("level").and_then(|v| v.as_str()).unwrap_or("INFO") {
+    let level = match value
+        .get("level")
+        .and_then(|v| v.as_str())
+        .unwrap_or("INFO")
+    {
         "ERROR" => tracing::Level::ERROR,
         "WARN" => tracing::Level::WARN,
         "DEBUG" => tracing::Level::DEBUG,
@@ -17969,10 +17961,7 @@ fn inject_daemon_log_entry(log_buffer: &log_layer::LogBuffer, text: &str) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_owned();
-    let fields_str = value
-        .get("fields")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let fields_str = value.get("fields").and_then(|v| v.as_str()).unwrap_or("");
     let ts_ms = value.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
     let timestamp = SystemTime::UNIX_EPOCH + Duration::from_millis(ts_ms);
 

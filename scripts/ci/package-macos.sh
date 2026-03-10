@@ -19,6 +19,11 @@ MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 ICONSET_DIR="${OUTPUT_DIR}/AppIcon.iconset"
 
+is_lfs_pointer() {
+  local path="$1"
+  [[ -f "$path" ]] && head -n 1 "$path" | grep -Fqx 'version https://git-lfs.github.com/spec/v1'
+}
+
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${ICONSET_DIR}"
 install -m 0755 "${BINARY_PATH}" "${MACOS_DIR}/${APP_NAME}"
 
@@ -54,6 +59,12 @@ fi
 FONTS_DIR="${ROOT_DIR}/assets/fonts"
 if [[ -d "${FONTS_DIR}" ]]; then
   mkdir -p "${RESOURCES_DIR}/fonts"
+  for font_path in "${FONTS_DIR}"/*.ttf; do
+    if is_lfs_pointer "${font_path}"; then
+      echo "error: font asset is a Git LFS pointer, run 'git lfs pull': ${font_path}" >&2
+      exit 1
+    fi
+  done
   cp "${FONTS_DIR}"/*.ttf "${RESOURCES_DIR}/fonts/"
   echo "bundled fonts from ${FONTS_DIR}"
 else
@@ -67,6 +78,10 @@ printf 'APPL????' > "${CONTENTS_DIR}/PkgInfo"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${TAG}" "${CONTENTS_DIR}/Info.plist"
 
 ICON_SOURCE="${ROOT_DIR}/assets/icons/arbor-icon-1024.png"
+if is_lfs_pointer "${ICON_SOURCE}"; then
+  echo "error: icon asset is a Git LFS pointer, run 'git lfs pull': ${ICON_SOURCE}" >&2
+  exit 1
+fi
 for size in 16 32 128 256 512; do
   sips -z "${size}" "${size}" "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_${size}x${size}.png" >/dev/null
   double_size=$((size * 2))
