@@ -3,15 +3,53 @@
 use {
     crate::{
         TERMINAL_COLS, TERMINAL_ROWS, TERMINAL_SCROLLBACK, TerminalCursor, TerminalModes,
-        TerminalSnapshot, TerminalStyledLine, alacritty_support,
+        TerminalSnapshot, TerminalStyledCell, TerminalStyledLine, alacritty_support,
     },
-    std::{ffi::c_void, ptr},
+    std::{cell::RefCell, ffi::c_void, ptr},
 };
 
 #[repr(C)]
 struct GhosttyBuffer {
     ptr: *mut u8,
     len: usize,
+}
+
+#[repr(C)]
+struct GhosttyStyledLine {
+    cell_start: usize,
+    cell_len: usize,
+}
+
+#[repr(C)]
+struct GhosttyStyledCell {
+    column: usize,
+    text_offset: usize,
+    text_len: usize,
+    fg: u32,
+    bg: u32,
+}
+
+#[repr(C)]
+struct GhosttyStyledSnapshot {
+    lines_ptr: *mut GhosttyStyledLine,
+    lines_len: usize,
+    cells_ptr: *mut GhosttyStyledCell,
+    cells_len: usize,
+    text_ptr: *mut u8,
+    text_len: usize,
+    cursor_visible: bool,
+    cursor_line: usize,
+    cursor_column: usize,
+    app_cursor: bool,
+    alt_screen: bool,
+}
+
+#[derive(Clone)]
+struct CachedStyledSnapshot {
+    generation: u64,
+    styled_lines: Vec<TerminalStyledLine>,
+    cursor: Option<TerminalCursor>,
+    modes: TerminalModes,
 }
 
 #[link(name = "arbor_ghostty_vt_bridge")]
@@ -21,7 +59,10 @@ unsafe extern "C" {
     fn arbor_ghostty_vt_process(handle: *mut c_void, bytes: *const u8, len: usize) -> i32;
     fn arbor_ghostty_vt_resize(handle: *mut c_void, rows: u16, cols: u16) -> i32;
     fn arbor_ghostty_vt_snapshot_plain(handle: *mut c_void, out: *mut GhosttyBuffer) -> i32;
-    fn arbor_ghostty_vt_snapshot_vt(handle: *mut c_void, out: *mut GhosttyBuffer) -> i32;
+    fn arbor_ghostty_vt_snapshot_styled(
+        handle: *mut c_void,
+        out: *mut GhosttyStyledSnapshot,
+    ) -> i32;
     fn arbor_ghostty_vt_snapshot_cursor(
         handle: *mut c_void,
         visible: *mut bool,
@@ -34,12 +75,13 @@ unsafe extern "C" {
         alt_screen: *mut bool,
     ) -> i32;
     fn arbor_ghostty_vt_free_buffer(buffer: GhosttyBuffer);
+    fn arbor_ghostty_vt_free_styled_snapshot(snapshot: GhosttyStyledSnapshot);
 }
 
 pub struct TerminalEmulator {
     handle: *mut c_void,
-    rows: u16,
-    cols: u16,
+    generation: u64,
+    styled_snapshot_cache: RefCell<Option<CachedStyledSnapshot>>,
 }
 
 impl TerminalEmulator {
@@ -61,7 +103,11 @@ impl TerminalEmulator {
             "ghostty-vt bridge returned a null terminal handle",
         );
 
-        Self { handle, rows, cols }
+        Self {
+            handle,
+            generation: 0,
+            styled_snapshot_cache: RefCell::new(None),
+        }
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
@@ -69,6 +115,8 @@ impl TerminalEmulator {
             return;
         }
         let _ = unsafe { arbor_ghostty_vt_process(self.handle, bytes.as_ptr(), bytes.len()) };
+        self.generation = self.generation.saturating_add(1);
+        self.styled_snapshot_cache.get_mut().take();
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -76,8 +124,8 @@ impl TerminalEmulator {
         let cols = cols.max(2);
         let status = unsafe { arbor_ghostty_vt_resize(self.handle, rows, cols) };
         if status == 0 {
-            self.rows = rows;
-            self.cols = cols;
+            self.generation = self.generation.saturating_add(1);
+            self.styled_snapshot_cache.get_mut().take();
         }
     }
 
@@ -101,6 +149,10 @@ impl TerminalEmulator {
     }
 
     pub fn snapshot_modes(&self) -> TerminalModes {
+        if let Some(snapshot) = self.cached_styled_snapshot() {
+            return snapshot.modes;
+        }
+
         let mut app_cursor = false;
         let mut alt_screen = false;
         let status = unsafe {
@@ -117,29 +169,69 @@ impl TerminalEmulator {
     }
 
     pub fn collect_styled_lines(&self) -> Vec<TerminalStyledLine> {
-        let vt_snapshot = self
-            .read_string(arbor_ghostty_vt_snapshot_vt)
-            .unwrap_or_default();
-        let replay = alacritty_support::replay_ansi(self.rows, self.cols, vt_snapshot.as_bytes());
-        alacritty_support::collect_styled_lines(&replay)
+        self.styled_snapshot().styled_lines
     }
 
     pub fn render_ansi_snapshot(&self, max_lines: usize) -> String {
-        let vt_snapshot = self
-            .read_string(arbor_ghostty_vt_snapshot_vt)
-            .unwrap_or_default();
-        let replay = alacritty_support::replay_ansi(self.rows, self.cols, vt_snapshot.as_bytes());
-        alacritty_support::render_ansi_snapshot(&replay, max_lines)
+        let snapshot = self.styled_snapshot();
+        alacritty_support::render_ansi_from_styled_lines(
+            &snapshot.styled_lines,
+            snapshot.cursor,
+            max_lines,
+        )
     }
 
     pub fn snapshot(&self) -> TerminalSnapshot {
+        let styled_snapshot = self.styled_snapshot();
         TerminalSnapshot {
             output: self.snapshot_output(),
-            styled_lines: self.collect_styled_lines(),
-            cursor: self.snapshot_cursor(),
-            modes: self.snapshot_modes(),
+            styled_lines: styled_snapshot.styled_lines,
+            cursor: styled_snapshot.cursor,
+            modes: styled_snapshot.modes,
             exit_code: None,
         }
+    }
+
+    fn styled_snapshot(&self) -> CachedStyledSnapshot {
+        if let Some(snapshot) = self.cached_styled_snapshot() {
+            return snapshot;
+        }
+
+        let mut raw_snapshot = GhosttyStyledSnapshot {
+            lines_ptr: ptr::null_mut(),
+            lines_len: 0,
+            cells_ptr: ptr::null_mut(),
+            cells_len: 0,
+            text_ptr: ptr::null_mut(),
+            text_len: 0,
+            cursor_visible: false,
+            cursor_line: 0,
+            cursor_column: 0,
+            app_cursor: false,
+            alt_screen: false,
+        };
+
+        let status = unsafe { arbor_ghostty_vt_snapshot_styled(self.handle, &mut raw_snapshot) };
+        if status != 0 {
+            return CachedStyledSnapshot {
+                generation: self.generation,
+                styled_lines: vec![alacritty_support::finalize_styled_line(Vec::new())],
+                cursor: None,
+                modes: TerminalModes::default(),
+            };
+        }
+
+        let snapshot = self.decode_styled_snapshot(raw_snapshot);
+        *self.styled_snapshot_cache.borrow_mut() = Some(snapshot.clone());
+        snapshot
+    }
+
+    fn cached_styled_snapshot(&self) -> Option<CachedStyledSnapshot> {
+        self.styled_snapshot_cache
+            .borrow()
+            .as_ref()
+            .filter(|snapshot| snapshot.generation == self.generation)
+            .cloned()
     }
 
     fn read_string(
@@ -161,6 +253,73 @@ impl TerminalEmulator {
             arbor_ghostty_vt_free_buffer(buffer);
         }
         Some(text)
+    }
+
+    fn decode_styled_snapshot(&self, snapshot: GhosttyStyledSnapshot) -> CachedStyledSnapshot {
+        let raw_lines = raw_slice(snapshot.lines_ptr, snapshot.lines_len);
+        let raw_cells = raw_slice(snapshot.cells_ptr, snapshot.cells_len);
+        let raw_text = raw_slice(snapshot.text_ptr, snapshot.text_len);
+
+        let mut styled_lines = Vec::with_capacity(raw_lines.len());
+        for raw_line in raw_lines {
+            let start = raw_line.cell_start.min(raw_cells.len());
+            let end = start.saturating_add(raw_line.cell_len).min(raw_cells.len());
+            let mut cells = Vec::with_capacity(end.saturating_sub(start));
+
+            for raw_cell in &raw_cells[start..end] {
+                let text_start = raw_cell.text_offset.min(raw_text.len());
+                let text_end = text_start
+                    .saturating_add(raw_cell.text_len)
+                    .min(raw_text.len());
+                let text = String::from_utf8_lossy(&raw_text[text_start..text_end]).into_owned();
+                cells.push(TerminalStyledCell {
+                    column: raw_cell.column,
+                    text,
+                    fg: raw_cell.fg,
+                    bg: raw_cell.bg,
+                });
+            }
+
+            styled_lines.push(alacritty_support::finalize_styled_line(cells));
+        }
+
+        while styled_lines
+            .last()
+            .is_some_and(|line| line.cells.is_empty())
+        {
+            styled_lines.pop();
+        }
+
+        if styled_lines.is_empty() {
+            styled_lines.push(alacritty_support::finalize_styled_line(Vec::new()));
+        }
+
+        let cached = CachedStyledSnapshot {
+            generation: self.generation,
+            styled_lines,
+            cursor: snapshot.cursor_visible.then_some(TerminalCursor {
+                line: snapshot.cursor_line,
+                column: snapshot.cursor_column,
+            }),
+            modes: TerminalModes {
+                app_cursor: snapshot.app_cursor,
+                alt_screen: snapshot.alt_screen,
+            },
+        };
+
+        unsafe {
+            arbor_ghostty_vt_free_styled_snapshot(snapshot);
+        }
+
+        cached
+    }
+}
+
+fn raw_slice<T>(ptr: *const T, len: usize) -> &'static [T] {
+    if len == 0 || ptr.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len) }
     }
 }
 
@@ -261,6 +420,30 @@ mod tests {
 
         emulator.process("\u{1b}[?25h".as_bytes());
         assert!(emulator.snapshot_cursor().is_some());
+    }
+
+    #[test]
+    fn snapshot_cursor_uses_screen_coordinates_with_scrollback() {
+        let mut emulator = TerminalEmulator::new();
+
+        for line_index in 0..120 {
+            let line = format!("line-{line_index:03}\r\n");
+            emulator.process(line.as_bytes());
+        }
+
+        emulator.process("prompt> ".as_bytes());
+
+        let cursor = emulator
+            .snapshot_cursor()
+            .expect("cursor should remain visible");
+        let styled_lines = emulator.collect_styled_lines();
+
+        assert_eq!(
+            cursor.line,
+            styled_lines.len().saturating_sub(1),
+            "cursor should point at the last rendered screen line",
+        );
+        assert_eq!(cursor.column, "prompt> ".chars().count());
     }
 
     #[test]

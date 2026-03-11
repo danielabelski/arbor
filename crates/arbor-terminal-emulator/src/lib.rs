@@ -1,17 +1,13 @@
-mod alacritty_support;
-
-#[cfg(not(feature = "ghostty-vt-experimental"))]
 mod alacritty_emulator;
+mod alacritty_support;
 #[cfg(feature = "ghostty-vt-experimental")]
 mod ghostty_vt_experimental;
+
+use std::sync::atomic::{AtomicU8, Ordering};
 
 pub const TERMINAL_ROWS: u16 = 24;
 pub const TERMINAL_COLS: u16 = 80;
 pub const TERMINAL_SCROLLBACK: usize = 8_000;
-#[cfg(not(feature = "ghostty-vt-experimental"))]
-pub const TERMINAL_ENGINE_NAME: &str = "alacritty";
-#[cfg(feature = "ghostty-vt-experimental")]
-pub const TERMINAL_ENGINE_NAME: &str = "ghostty-vt-experimental";
 
 pub const TERMINAL_DEFAULT_FG: u32 = 0xabb2bf;
 pub const TERMINAL_DEFAULT_BG: u32 = 0x282c34;
@@ -68,8 +64,231 @@ pub struct TerminalStyledRun {
     pub bg: u32,
 }
 
-#[cfg(not(feature = "ghostty-vt-experimental"))]
-pub use alacritty_emulator::TerminalEmulator;
 pub use alacritty_support::process_terminal_bytes;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalEngineKind {
+    Alacritty,
+    #[cfg(feature = "ghostty-vt-experimental")]
+    GhosttyVtExperimental,
+}
+
+impl TerminalEngineKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Alacritty => "alacritty",
+            #[cfg(feature = "ghostty-vt-experimental")]
+            Self::GhosttyVtExperimental => "ghostty-vt-experimental",
+        }
+    }
+}
+
+impl Default for TerminalEngineKind {
+    fn default() -> Self {
+        Self::Alacritty
+    }
+}
+
+static DEFAULT_TERMINAL_ENGINE: AtomicU8 = AtomicU8::new(TerminalEngineKind::Alacritty as u8);
+
+pub fn default_terminal_engine() -> TerminalEngineKind {
+    match DEFAULT_TERMINAL_ENGINE.load(Ordering::Relaxed) {
+        0 => TerminalEngineKind::Alacritty,
+        #[cfg(feature = "ghostty-vt-experimental")]
+        1 => TerminalEngineKind::GhosttyVtExperimental,
+        _ => TerminalEngineKind::Alacritty,
+    }
+}
+
+pub fn set_default_terminal_engine(engine: TerminalEngineKind) {
+    DEFAULT_TERMINAL_ENGINE.store(
+        match engine {
+            TerminalEngineKind::Alacritty => 0,
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEngineKind::GhosttyVtExperimental => 1,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+pub fn parse_terminal_engine_kind(value: Option<&str>) -> Result<TerminalEngineKind, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(TerminalEngineKind::default());
+    };
+
+    match value.to_ascii_lowercase().as_str() {
+        "alacritty" => Ok(TerminalEngineKind::Alacritty),
+        "ghostty-vt-experimental" | "ghostty-vt" | "ghostty" => {
+            #[cfg(feature = "ghostty-vt-experimental")]
+            {
+                Ok(TerminalEngineKind::GhosttyVtExperimental)
+            }
+            #[cfg(not(feature = "ghostty-vt-experimental"))]
+            {
+                Err(
+                    "embedded_terminal_engine `ghostty-vt-experimental` requires Arbor to be built with the `ghostty-vt-experimental` cargo feature"
+                        .to_owned(),
+                )
+            }
+        },
+        _ => Err(format!(
+            "invalid embedded_terminal_engine `{value}`, expected alacritty{}",
+            available_terminal_engine_suffix(),
+        )),
+    }
+}
+
 #[cfg(feature = "ghostty-vt-experimental")]
-pub use ghostty_vt_experimental::TerminalEmulator;
+const fn available_terminal_engine_suffix() -> &'static str {
+    " or ghostty-vt-experimental"
+}
+
+#[cfg(not(feature = "ghostty-vt-experimental"))]
+const fn available_terminal_engine_suffix() -> &'static str {
+    ""
+}
+
+enum TerminalEmulatorInner {
+    Alacritty(alacritty_emulator::TerminalEmulator),
+    #[cfg(feature = "ghostty-vt-experimental")]
+    Ghostty(ghostty_vt_experimental::TerminalEmulator),
+}
+
+pub struct TerminalEmulator {
+    inner: TerminalEmulatorInner,
+}
+
+impl TerminalEmulator {
+    pub fn new() -> Self {
+        Self::with_engine(default_terminal_engine(), TERMINAL_ROWS, TERMINAL_COLS)
+    }
+
+    pub fn with_size(rows: u16, cols: u16) -> Self {
+        Self::with_engine(default_terminal_engine(), rows, cols)
+    }
+
+    pub fn with_engine(engine: TerminalEngineKind, rows: u16, cols: u16) -> Self {
+        let inner = match engine {
+            TerminalEngineKind::Alacritty => TerminalEmulatorInner::Alacritty(
+                alacritty_emulator::TerminalEmulator::with_size(rows, cols),
+            ),
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEngineKind::GhosttyVtExperimental => TerminalEmulatorInner::Ghostty(
+                ghostty_vt_experimental::TerminalEmulator::with_size(rows, cols),
+            ),
+        };
+        Self { inner }
+    }
+
+    pub fn engine(&self) -> TerminalEngineKind {
+        match &self.inner {
+            TerminalEmulatorInner::Alacritty(_) => TerminalEngineKind::Alacritty,
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEmulatorInner::Ghostty(_) => TerminalEngineKind::GhosttyVtExperimental,
+        }
+    }
+
+    pub fn process(&mut self, bytes: &[u8]) {
+        match &mut self.inner {
+            TerminalEmulatorInner::Alacritty(emulator) => emulator.process(bytes),
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEmulatorInner::Ghostty(emulator) => emulator.process(bytes),
+        }
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        match &mut self.inner {
+            TerminalEmulatorInner::Alacritty(emulator) => emulator.resize(rows, cols),
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEmulatorInner::Ghostty(emulator) => emulator.resize(rows, cols),
+        }
+    }
+
+    pub fn snapshot_output(&self) -> String {
+        match &self.inner {
+            TerminalEmulatorInner::Alacritty(emulator) => emulator.snapshot_output(),
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEmulatorInner::Ghostty(emulator) => emulator.snapshot_output(),
+        }
+    }
+
+    pub fn snapshot_cursor(&self) -> Option<TerminalCursor> {
+        match &self.inner {
+            TerminalEmulatorInner::Alacritty(emulator) => emulator.snapshot_cursor(),
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEmulatorInner::Ghostty(emulator) => emulator.snapshot_cursor(),
+        }
+    }
+
+    pub fn snapshot_modes(&self) -> TerminalModes {
+        match &self.inner {
+            TerminalEmulatorInner::Alacritty(emulator) => emulator.snapshot_modes(),
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEmulatorInner::Ghostty(emulator) => emulator.snapshot_modes(),
+        }
+    }
+
+    pub fn collect_styled_lines(&self) -> Vec<TerminalStyledLine> {
+        match &self.inner {
+            TerminalEmulatorInner::Alacritty(emulator) => emulator.collect_styled_lines(),
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEmulatorInner::Ghostty(emulator) => emulator.collect_styled_lines(),
+        }
+    }
+
+    pub fn render_ansi_snapshot(&self, max_lines: usize) -> String {
+        match &self.inner {
+            TerminalEmulatorInner::Alacritty(emulator) => emulator.render_ansi_snapshot(max_lines),
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEmulatorInner::Ghostty(emulator) => emulator.render_ansi_snapshot(max_lines),
+        }
+    }
+
+    pub fn snapshot(&self) -> TerminalSnapshot {
+        match &self.inner {
+            TerminalEmulatorInner::Alacritty(emulator) => emulator.snapshot(),
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEmulatorInner::Ghostty(emulator) => emulator.snapshot(),
+        }
+    }
+}
+
+impl Default for TerminalEmulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_terminal_engine_defaults_to_alacritty() {
+        assert_eq!(
+            parse_terminal_engine_kind(None),
+            Ok(TerminalEngineKind::Alacritty),
+        );
+        assert_eq!(
+            parse_terminal_engine_kind(Some("")),
+            Ok(TerminalEngineKind::Alacritty),
+        );
+    }
+
+    #[test]
+    fn parse_terminal_engine_accepts_alacritty() {
+        assert_eq!(
+            parse_terminal_engine_kind(Some("alacritty")),
+            Ok(TerminalEngineKind::Alacritty),
+        );
+    }
+
+    #[cfg(feature = "ghostty-vt-experimental")]
+    #[test]
+    fn parse_terminal_engine_accepts_ghostty() {
+        assert_eq!(
+            parse_terminal_engine_kind(Some("ghostty-vt-experimental")),
+            Ok(TerminalEngineKind::GhosttyVtExperimental),
+        );
+    }
+}

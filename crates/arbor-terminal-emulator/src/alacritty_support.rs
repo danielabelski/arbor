@@ -62,13 +62,6 @@ pub(crate) fn new_state(rows: u16, cols: u16) -> AlacrittyState {
     }
 }
 
-#[cfg(feature = "ghostty-vt-experimental")]
-pub(crate) fn replay_ansi(rows: u16, cols: u16, bytes: &[u8]) -> Term<VoidListener> {
-    let mut state = new_state(rows.max(1), cols.max(2));
-    state.processor.advance(&mut state.term, bytes);
-    state.term
-}
-
 pub fn process_terminal_bytes(
     emulator: &Arc<Mutex<crate::TerminalEmulator>>,
     generation: &Arc<AtomicU64>,
@@ -117,54 +110,6 @@ pub(crate) fn snapshot_modes(term: &Term<VoidListener>) -> TerminalModes {
     }
 }
 
-pub(crate) fn render_ansi_snapshot(term: &Term<VoidListener>, max_lines: usize) -> String {
-    let lines = collect_styled_lines(term);
-    let keep_from = if max_lines == 0 {
-        0
-    } else {
-        lines.len().saturating_sub(max_lines)
-    };
-
-    let mut output = String::new();
-    for (index, line) in lines[keep_from..].iter().enumerate() {
-        if index > 0 {
-            output.push_str("\r\n");
-        }
-        for run in &line.runs {
-            let r_fg = (run.fg >> 16) & 0xFF;
-            let g_fg = (run.fg >> 8) & 0xFF;
-            let b_fg = run.fg & 0xFF;
-
-            if run.bg != TERMINAL_DEFAULT_BG {
-                let r_bg = (run.bg >> 16) & 0xFF;
-                let g_bg = (run.bg >> 8) & 0xFF;
-                let b_bg = run.bg & 0xFF;
-                output.push_str(&format!(
-                    "\x1b[38;2;{r_fg};{g_fg};{b_fg};48;2;{r_bg};{g_bg};{b_bg}m"
-                ));
-            } else {
-                output.push_str(&format!("\x1b[38;2;{r_fg};{g_fg};{b_fg}m"));
-            }
-            output.push_str(&run.text);
-        }
-        output.push_str("\x1b[0m");
-    }
-
-    if let Some(cursor) = snapshot_cursor(term) {
-        let emitted_lines = lines.len().saturating_sub(keep_from);
-        let cursor_line_in_emitted = cursor.line.saturating_sub(keep_from);
-        let lines_up = emitted_lines
-            .saturating_sub(1)
-            .saturating_sub(cursor_line_in_emitted);
-        if lines_up > 0 {
-            output.push_str(&format!("\x1b[{lines_up}A"));
-        }
-        output.push_str(&format!("\x1b[{}G", cursor.column + 1));
-    }
-
-    output
-}
-
 pub(crate) fn collect_styled_lines(term: &Term<VoidListener>) -> Vec<TerminalStyledLine> {
     let grid = term.grid();
     let colors = term.colors();
@@ -201,9 +146,7 @@ pub(crate) fn collect_styled_lines(term: &Term<VoidListener>) -> Vec<TerminalSty
             });
         }
 
-        trim_trailing_whitespace_cells(&mut cells);
-        let runs = runs_from_cells(&cells);
-        lines.push(TerminalStyledLine { cells, runs });
+        lines.push(finalize_styled_line(cells));
     }
 
     while lines.last().is_some_and(|line| line.cells.is_empty()) {
@@ -301,7 +244,64 @@ fn named_color_to_rgb(color: NamedColor, default: u32) -> u32 {
     }
 }
 
-fn trim_trailing_whitespace_cells(cells: &mut Vec<TerminalStyledCell>) {
+pub(crate) fn finalize_styled_line(mut cells: Vec<TerminalStyledCell>) -> TerminalStyledLine {
+    trim_trailing_whitespace_cells(&mut cells);
+    let runs = runs_from_cells(&cells);
+    TerminalStyledLine { cells, runs }
+}
+
+pub(crate) fn render_ansi_from_styled_lines(
+    lines: &[TerminalStyledLine],
+    cursor: Option<TerminalCursor>,
+    max_lines: usize,
+) -> String {
+    let keep_from = if max_lines == 0 {
+        0
+    } else {
+        lines.len().saturating_sub(max_lines)
+    };
+
+    let mut output = String::new();
+    for (index, line) in lines[keep_from..].iter().enumerate() {
+        if index > 0 {
+            output.push_str("\r\n");
+        }
+        for run in &line.runs {
+            let r_fg = (run.fg >> 16) & 0xFF;
+            let g_fg = (run.fg >> 8) & 0xFF;
+            let b_fg = run.fg & 0xFF;
+
+            if run.bg != TERMINAL_DEFAULT_BG {
+                let r_bg = (run.bg >> 16) & 0xFF;
+                let g_bg = (run.bg >> 8) & 0xFF;
+                let b_bg = run.bg & 0xFF;
+                output.push_str(&format!(
+                    "\x1b[38;2;{r_fg};{g_fg};{b_fg};48;2;{r_bg};{g_bg};{b_bg}m"
+                ));
+            } else {
+                output.push_str(&format!("\x1b[38;2;{r_fg};{g_fg};{b_fg}m"));
+            }
+            output.push_str(&run.text);
+        }
+        output.push_str("\x1b[0m");
+    }
+
+    if let Some(cursor) = cursor {
+        let emitted_lines = lines.len().saturating_sub(keep_from);
+        let cursor_line_in_emitted = cursor.line.saturating_sub(keep_from);
+        let lines_up = emitted_lines
+            .saturating_sub(1)
+            .saturating_sub(cursor_line_in_emitted);
+        if lines_up > 0 {
+            output.push_str(&format!("\x1b[{lines_up}A"));
+        }
+        output.push_str(&format!("\x1b[{}G", cursor.column + 1));
+    }
+
+    output
+}
+
+pub(crate) fn trim_trailing_whitespace_cells(cells: &mut Vec<TerminalStyledCell>) {
     while let Some(last_cell) = cells.last() {
         if last_cell.bg != TERMINAL_DEFAULT_BG {
             break;
@@ -315,7 +315,7 @@ fn trim_trailing_whitespace_cells(cells: &mut Vec<TerminalStyledCell>) {
     }
 }
 
-fn runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<TerminalStyledRun> {
+pub(crate) fn runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<TerminalStyledRun> {
     let mut runs = Vec::new();
     let mut current_style: Option<StyledColor> = None;
     let mut current_text = String::new();
