@@ -1,5 +1,5 @@
 use {
-    crate::{checkout::CheckoutKind, types::SidebarItemId},
+    crate::{SidebarItemId, checkout::CheckoutKind},
     serde::{Deserialize, Serialize},
     std::{
         collections::HashMap,
