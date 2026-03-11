@@ -157,7 +157,6 @@ fn format_stream(label: &str, value: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[cfg(not(target_os = "windows"))]
     use {std::fs, tempfile::tempdir};
 
