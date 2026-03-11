@@ -11514,11 +11514,16 @@ impl ArborWindow {
         let pr_enabled = can_run_actions && !is_busy;
         let search_lower = self.right_pane_search.to_lowercase();
 
-        // Build the mode toggle (only visible when a PR exists)
-        let mode_toggle = div()
+        // Mode toggle row (only visible when a PR exists)
+        let mode_toggle_row = div()
+            .h(px(28.))
+            .px_1()
             .flex()
             .items_center()
+            .justify_center()
             .gap_0()
+            .border_b_1()
+            .border_color(rgb(theme.border))
             .child(self.render_changes_mode_button(
                 "Local",
                 ChangesViewMode::Local,
@@ -11534,7 +11539,7 @@ impl ArborWindow {
                 cx,
             ));
 
-        let header = div()
+        let action_header = div()
             .h(px(32.))
             .px_1()
             .gap_1()
@@ -11609,8 +11614,7 @@ impl ArborWindow {
                             format!("{} files", self.pr_changed_files.len())
                         }),
                 )
-            })
-            .when(has_pr, |this| this.child(mode_toggle));
+            });
 
         let file_list = if is_pr_mode {
             self.render_pr_changed_files_list(&selected_path, &search_lower, theme, cx)
@@ -11623,7 +11627,8 @@ impl ArborWindow {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(header)
+            .when(has_pr, |this| this.child(mode_toggle_row))
+            .child(action_header)
             .child(file_list)
     }
 
