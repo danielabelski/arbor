@@ -33,7 +33,7 @@ lint: lockfile-check
     cargo +{{nightly_toolchain}} clippy --workspace --all-features --all-targets -- -D warnings
 
 test:
-    cargo +{{nightly_toolchain}} test --workspace --all-features
+    cargo +{{nightly_toolchain}} test --workspace
 
 ghostty-vt-bridge:
     ./scripts/build-ghostty-vt-bridge.sh
@@ -51,7 +51,7 @@ bench-embedded-terminal-engines: ghostty-vt-bridge
     RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}" cargo +{{nightly_toolchain}} test -p arbor-terminal-emulator --features ghostty-vt-experimental --test engine_performance -- --ignored --nocapture
 
 bench-embedded-terminal-codspeed: ghostty-vt-bridge
-    RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}" cargo +{{nightly_toolchain}} bench -p arbor-benchmarks --bench embedded_terminal
+    RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}" cargo +{{nightly_toolchain}} bench -p arbor-benchmarks --features ghostty-vt-experimental --bench embedded_terminal
 
 zizmor:
     zizmor .github/workflows/

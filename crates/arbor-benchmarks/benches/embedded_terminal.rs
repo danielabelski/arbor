@@ -18,6 +18,7 @@ fn process_alacritty(bencher: divan::Bencher) {
     });
 }
 
+#[cfg(feature = "ghostty-vt-experimental")]
 #[divan::bench]
 fn process_ghostty_vt_experimental(bencher: divan::Bencher) {
     let workload = benchmark_workload();
@@ -42,6 +43,7 @@ fn snapshot_alacritty(bencher: divan::Bencher) {
     });
 }
 
+#[cfg(feature = "ghostty-vt-experimental")]
 #[divan::bench]
 fn snapshot_ghostty_vt_experimental(bencher: divan::Bencher) {
     let emulator = populated_emulator(TerminalEngineKind::GhosttyVtExperimental);
@@ -63,6 +65,7 @@ fn render_ansi_alacritty(bencher: divan::Bencher) {
     });
 }
 
+#[cfg(feature = "ghostty-vt-experimental")]
 #[divan::bench]
 fn render_ansi_ghostty_vt_experimental(bencher: divan::Bencher) {
     let emulator = populated_emulator(TerminalEngineKind::GhosttyVtExperimental);
@@ -89,6 +92,7 @@ fn full_roundtrip_alacritty(bencher: divan::Bencher) {
     });
 }
 
+#[cfg(feature = "ghostty-vt-experimental")]
 #[divan::bench]
 fn full_roundtrip_ghostty_vt_experimental(bencher: divan::Bencher) {
     let workload = benchmark_workload();

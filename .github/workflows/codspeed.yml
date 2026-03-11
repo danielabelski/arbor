@@ -72,10 +72,10 @@ jobs:
         run: ./scripts/build-ghostty-vt-bridge.sh
 
       - name: Build benchmarks
-        run: cargo codspeed build -p arbor-benchmarks --bench embedded_terminal
+        run: cargo codspeed build -p arbor-benchmarks --features ghostty-vt-experimental --bench embedded_terminal
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@4deb3275dd364fb96fb074c953133d29ec96f80f # v4
         with:
           mode: simulation
-          run: cargo codspeed run -p arbor-benchmarks --bench embedded_terminal
+          run: cargo codspeed run -p arbor-benchmarks --features ghostty-vt-experimental --bench embedded_terminal
