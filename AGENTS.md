@@ -31,6 +31,7 @@ This file defines how coding agents should behave in this repository.
 - Use `SessionId` and `WorkspaceId` newtypes (from `arbor_core::id`) instead of raw `String`.
 - Use clear error handling with typed errors (`thiserror`/`anyhow` where appropriate).
 - Keep modules focused and delete dead code instead of leaving it around.
+- **Never shell out to external CLIs** (`gh`, `git` via `Command::new`, etc.) for GitHub API calls. Use Rust crates (`octocrab`, `reqwest`, etc.) instead. `std::process::Command` is if no rust crate exists.
 
 ## Code Organization
 

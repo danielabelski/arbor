@@ -2505,18 +2505,27 @@ impl ArborWindow {
             None => return,
         };
 
-        let pr_details = match &worktree.pr_details {
-            Some(d) => d,
+        let pr_number = match worktree
+            .pr_details
+            .as_ref()
+            .map(|d| d.number)
+            .or(worktree.pr_number)
+        {
+            Some(n) => n,
             None => return,
         };
+
+        let base_ref_name = worktree
+            .pr_details
+            .as_ref()
+            .map(|d| d.base_ref_name.clone())
+            .unwrap_or_else(|| "main".to_owned());
 
         let repo_slug = match self.github_repo_slug.clone() {
             Some(s) => s,
             None => return,
         };
 
-        let pr_number = pr_details.number;
-        let base_ref_name = pr_details.base_ref_name.clone();
         let worktree_path = worktree.path.clone();
 
         self.pr_changed_files_loading = true;
@@ -11928,7 +11937,7 @@ impl ArborWindow {
         let selected_path = self.selected_changed_file.clone();
         let has_pr = self
             .active_worktree()
-            .is_some_and(|w| w.pr_details.is_some());
+            .is_some_and(|w| w.pr_number.is_some());
         let view_mode = self.changes_view_mode;
         let is_pr_mode = view_mode == ChangesViewMode::PrChanges;
 
@@ -12044,17 +12053,24 @@ impl ArborWindow {
                             div()
                                 .id("refresh-review-comments")
                                 .cursor_pointer()
-                                .text_xs()
-                                .text_color(rgb(if threads_loading {
-                                    theme.text_disabled
-                                } else {
-                                    theme.text_muted
-                                }))
-                                .hover(|s| s.text_color(rgb(theme.text_primary)))
-                                .child(if threads_loading {
-                                    "\u{f021} ..."
-                                } else {
-                                    "\u{f021}"
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .hover(|s| s.opacity(0.8))
+                                .when(threads_loading, |this| this.opacity(0.4))
+                                .child(
+                                    svg()
+                                        .path("icons/ui/refresh-muted.svg")
+                                        .size(px(14.))
+                                        .text_color(rgb(theme.text_muted)),
+                                )
+                                .when(threads_loading, |this| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(theme.text_disabled))
+                                            .child("..."),
+                                    )
                                 })
                                 .when(!threads_loading, |this| {
                                     this.on_click(cx.listener(|this, _, _, cx| {

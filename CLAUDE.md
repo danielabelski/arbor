@@ -46,6 +46,7 @@ Conventional commits: `feat|fix|docs|style|refactor|test|chore(scope): descripti
 - Use `SessionId` and `WorkspaceId` newtypes from `arbor_core::id` instead of raw `String` for session/workspace identifiers. These are `#[serde(transparent)]` for wire compatibility.
 - Keep modules focused and delete dead code instead of leaving it around.
 - Collapse nested `if` / `if let` statements when possible (clippy `collapsible_if`).
+- **Never shell out to external CLIs** (`gh`, `git` via `Command::new`, etc.) for GitHub API calls or operations that can be done with Rust crates. Use `octocrab`, `reqwest`, or other Rust HTTP/API crates instead. The only acceptable use of `std::process::Command` is where no Rust crate equivalent exists.
 
 ## Module Organization
 
