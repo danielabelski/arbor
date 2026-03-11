@@ -30,7 +30,7 @@ teardown = ["rm -f .env"]
 
 [notifications]
 desktop = true
-events = ["agent_finished", "agent_error"]
+events = ["agent_started", "agent_finished", "agent_error"]
 webhook_urls = ["https://example.com/hook"]
 ```
 
@@ -52,6 +52,12 @@ Tier 1 adds repo-local task templates loaded from:
 
 These templates are searchable from `Cmd+K` and can launch a prompt with the selected agent preset.
 
+Template launching and AI commit-message generation share the same prompt runner. Today that means:
+
+- `Claude`, `Codex`, `OpenCode`, and `Copilot` support non-interactive prompt execution where Arbor can capture output directly
+- `Pi` still launches through the terminal path only
+- unsupported or empty preset commands fail with a visible Arbor notice instead of silently doing nothing
+
 ## Command Palette
 
 The command palette can search and execute:
@@ -62,3 +68,9 @@ The command palette can search and execute:
 - agent presets
 - repo presets
 - task templates
+
+Ranking also prefers:
+
+- recent palette selections
+- the active repository and worktree
+- the currently selected agent preset

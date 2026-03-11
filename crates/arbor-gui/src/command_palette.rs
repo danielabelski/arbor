@@ -131,38 +131,80 @@ impl ArborWindow {
             .command_palette_items()
             .into_iter()
             .filter_map(|item| {
-                command_palette_match_score(&item, &query).map(|score| (score, item))
+                command_palette_match_score(&item, &query).map(|score| {
+                    (
+                        self.command_palette_recent_rank(&item),
+                        self.command_palette_context_rank(&item),
+                        score,
+                        item,
+                    )
+                })
             })
             .collect::<Vec<_>>();
-        matches.sort_by(|(left_score, left_item), (right_score, right_item)| {
-            left_score
-                .cmp(right_score)
-                .then_with(|| {
-                    left_item
-                        .title
-                        .to_ascii_lowercase()
-                        .cmp(&right_item.title.to_ascii_lowercase())
-                })
-        });
-        matches.into_iter().map(|(_, item)| item).collect()
+        matches.sort_by(
+            |(left_recent, left_context, left_score, left_item),
+             (right_recent, right_context, right_score, right_item)| {
+                left_recent
+                    .cmp(right_recent)
+                    .then_with(|| left_context.cmp(right_context))
+                    .then_with(|| left_score.cmp(right_score))
+                    .then_with(|| {
+                        left_item
+                            .title
+                            .to_ascii_lowercase()
+                            .cmp(&right_item.title.to_ascii_lowercase())
+                    })
+            },
+        );
+        matches.into_iter().map(|(_, _, _, item)| item).collect()
     }
 
-    fn move_command_palette_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let item_count = self.filtered_command_palette_items().len();
-        let Some(modal) = self.command_palette_modal.as_mut() else {
-            return;
-        };
-        if item_count == 0 {
-            modal.selected_index = 0;
-            cx.notify();
-            return;
-        }
+    fn command_palette_recent_rank(&self, item: &CommandPaletteItem) -> usize {
+        let action_key = command_palette_action_key(item);
+        self.command_palette_recent_actions
+            .iter()
+            .position(|recent| recent == &action_key)
+            .unwrap_or(usize::MAX)
+    }
 
-        let current = modal.selected_index.min(item_count - 1) as isize;
-        let next = (current + delta).rem_euclid(item_count as isize) as usize;
-        modal.selected_index = next;
-        self.command_palette_scroll_handle.scroll_to_item(next);
-        cx.notify();
+    fn command_palette_context_rank(&self, item: &CommandPaletteItem) -> usize {
+        match &item.action {
+            CommandPaletteAction::SelectWorktree(index) => {
+                if self.active_worktree_index == Some(*index) {
+                    0
+                } else {
+                    2
+                }
+            },
+            CommandPaletteAction::SelectRepository(index) => {
+                if self.active_repository_index == Some(*index) {
+                    0
+                } else {
+                    2
+                }
+            },
+            CommandPaletteAction::LaunchRepoPreset(_) => 1,
+            CommandPaletteAction::LaunchTaskTemplate(task) => self
+                .active_repository_index
+                .and_then(|index| self.repositories.get(index))
+                .map(|repository| usize::from(repository.root != task.repo_root) + 1)
+                .unwrap_or(2),
+            CommandPaletteAction::LaunchAgentPreset(kind) => {
+                usize::from(self.active_preset_tab != Some(*kind)) + 1
+            },
+            CommandPaletteAction::OpenCreateWorktree
+            | CommandPaletteAction::RefreshWorktrees
+            | CommandPaletteAction::OpenSettings
+            | CommandPaletteAction::OpenThemePicker => 3,
+        }
+    }
+
+    fn remember_command_palette_action(&mut self, item: &CommandPaletteItem) {
+        let action_key = command_palette_action_key(item);
+        self.command_palette_recent_actions
+            .retain(|recent| recent != &action_key);
+        self.command_palette_recent_actions.insert(0, action_key);
+        self.command_palette_recent_actions.truncate(20);
     }
 
     fn execute_command_palette_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -177,6 +219,7 @@ impl ArborWindow {
         };
 
         self.command_palette_modal = None;
+        self.remember_command_palette_action(&item);
         match item.action {
             CommandPaletteAction::OpenCreateWorktree => {
                 let repo_index = self.active_repository_index.unwrap_or(0);
@@ -197,6 +240,24 @@ impl ArborWindow {
                 self.launch_task_template(&task, window, cx);
             },
         }
+        cx.notify();
+    }
+
+    fn move_command_palette_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let item_count = self.filtered_command_palette_items().len();
+        let Some(modal) = self.command_palette_modal.as_mut() else {
+            return;
+        };
+        if item_count == 0 {
+            modal.selected_index = 0;
+            cx.notify();
+            return;
+        }
+
+        let current = modal.selected_index.min(item_count - 1) as isize;
+        let next = (current + delta).rem_euclid(item_count as isize) as usize;
+        modal.selected_index = next;
+        self.command_palette_scroll_handle.scroll_to_item(next);
         cx.notify();
     }
 
@@ -263,7 +324,14 @@ impl ArborWindow {
             return;
         }
 
-        let invocation = format!("{command} {}\n", shell_quote(&task.prompt));
+        let invocation = match prompt_terminal_invocation(preset, &command, &task.prompt) {
+            Ok(invocation) => format!("{invocation}\n"),
+            Err(error) => {
+                self.notice = Some(format!("failed to run task {}: {error}", task.name));
+                cx.notify();
+                return;
+            },
+        };
         let terminal_count_before = self.terminals.len();
         self.spawn_terminal_session(window, cx);
         if self.terminals.len() <= terminal_count_before {
@@ -586,6 +654,10 @@ fn command_palette_scrollbar_indicator(
                     .bg(rgb(theme.accent)),
             ),
     )
+}
+
+fn command_palette_action_key(item: &CommandPaletteItem) -> String {
+    format!("{}|{}", item.title, item.subtitle)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

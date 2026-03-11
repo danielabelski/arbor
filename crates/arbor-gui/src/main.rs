@@ -66,6 +66,7 @@ use {
 include!("types.rs");
 include!("theme_picker.rs");
 include!("repo_presets.rs");
+include!("prompt_runner.rs");
 include!("command_palette.rs");
 include!("git_actions.rs");
 include!("worktree_lifecycle.rs");
@@ -285,6 +286,7 @@ impl ArborWindow {
                     connect_to_host_modal: None,
                     command_palette_modal: None,
                     command_palette_scroll_handle: ScrollHandle::new(),
+                    command_palette_recent_actions: Vec::new(),
                     connection_history: connection_history::load_history(),
                     daemon_auth_tokens: connection_history::load_tokens(),
                     connected_daemon_label: None,
@@ -299,6 +301,7 @@ impl ArborWindow {
                     last_ui_state_error: None,
                     notification_service,
                     notifications_enabled,
+                    last_agent_finished_notifications: HashMap::new(),
                     window_is_active: true,
                     notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
                     theme_toast: None,
@@ -613,6 +616,7 @@ impl ArborWindow {
             connect_to_host_modal: None,
             command_palette_modal: None,
             command_palette_scroll_handle: ScrollHandle::new(),
+            command_palette_recent_actions: Vec::new(),
             connection_history: connection_history::load_history(),
             daemon_auth_tokens: connection_history::load_tokens(),
             connected_daemon_label: None,
@@ -641,6 +645,7 @@ impl ArborWindow {
             last_ui_state_error: None,
             notification_service,
             notifications_enabled,
+            last_agent_finished_notifications: HashMap::new(),
             window_is_active: true,
             notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
             theme_toast: None,
@@ -1305,15 +1310,28 @@ impl ArborWindow {
             || notifications.events.iter().any(|event| event == event_name)
     }
 
-    fn maybe_notify_agent_finished(&self, worktree: &WorktreeSummary) {
+    fn maybe_notify_agent_finished(&mut self, worktree: &WorktreeSummary, updated_at: Option<u64>) {
         if !self.repo_allows_desktop_notification(worktree, "agent_finished") {
             return;
         }
 
+        if !should_emit_agent_finished_notification(
+            &mut self.last_agent_finished_notifications,
+            &worktree.path,
+            updated_at.or(worktree.last_activity_unix_ms),
+        ) {
+            return;
+        }
+
+        let repo_name = repository_display_name(&worktree.repo_root);
+        let branch = worktree::short_branch(&worktree.branch);
         let body = if let Some(task) = worktree.agent_task.as_deref() {
-            format!("{} is waiting: {task}", worktree.label)
+            format!(
+                "{} · {} · {} is waiting: {task}",
+                repo_name, worktree.label, branch
+            )
         } else {
-            format!("{} is waiting", worktree.label)
+            format!("{} · {} · {} is waiting", repo_name, worktree.label, branch)
         };
         self.maybe_notify("Agent finished", &body, true);
     }
@@ -4069,7 +4087,7 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, 
                 }
             }
             if let Some(worktree) = notification_worktree.as_ref() {
-                app.maybe_notify_agent_finished(worktree);
+                app.maybe_notify_agent_finished(worktree, *updated_at);
             }
         } else {
             tracing::warn!(
@@ -4125,6 +4143,24 @@ fn inject_daemon_log_entry(log_buffer: &log_layer::LogBuffer, text: &str) {
         message,
         fields,
     });
+}
+
+fn should_emit_agent_finished_notification(
+    notifications: &mut HashMap<PathBuf, u64>,
+    worktree_path: &Path,
+    updated_at: Option<u64>,
+) -> bool {
+    let notification_timestamp = updated_at.unwrap_or_default();
+    if notifications
+        .get(worktree_path)
+        .copied()
+        .is_some_and(|previous| previous >= notification_timestamp)
+    {
+        return false;
+    }
+
+    notifications.insert(worktree_path.to_path_buf(), notification_timestamp);
+    true
 }
 
 fn install_claude_code_hooks(daemon_base_url: &str) -> Result<(), String> {
@@ -6021,6 +6057,13 @@ fn parse_task_template_content(
 }
 
 fn shell_quote(value: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let escaped = value.replace('"', "\"\"");
+        return format!("\"{escaped}\"");
+    }
+
+    #[cfg(not(target_os = "windows"))]
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
@@ -6108,7 +6151,7 @@ mod tests {
             daemon,
         },
         gpui::{Keystroke, point, px},
-        std::{path::Path, sync::Arc, time::Instant},
+        std::{collections::HashMap, path::Path, sync::Arc, time::Instant},
     };
 
     fn session_with_styled_line(
@@ -7018,6 +7061,33 @@ mod tests {
     #[test]
     fn seed_repo_root_from_cwd_when_store_has_saved_roots() {
         assert!(crate::should_seed_repo_root_from_cwd(true, false));
+    }
+
+    #[test]
+    fn agent_finished_notifications_are_deduped_by_timestamp() {
+        let path = Path::new("/tmp/repo/worktree");
+        let mut notifications = HashMap::new();
+
+        assert!(crate::should_emit_agent_finished_notification(
+            &mut notifications,
+            path,
+            Some(10),
+        ));
+        assert!(!crate::should_emit_agent_finished_notification(
+            &mut notifications,
+            path,
+            Some(10),
+        ));
+        assert!(!crate::should_emit_agent_finished_notification(
+            &mut notifications,
+            path,
+            Some(9),
+        ));
+        assert!(crate::should_emit_agent_finished_notification(
+            &mut notifications,
+            path,
+            Some(11),
+        ));
     }
 
     #[test]

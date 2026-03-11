@@ -26,7 +26,18 @@ Arbor supports both local and remote notification paths:
 - native desktop notifications from the GUI
 - webhook delivery from the daemon
 
-The repo config can filter notifications by event name.
+The repo config can filter notifications by event name. Current webhook event names are:
+
+- `agent_started`
+- `agent_finished`
+- `agent_error`
+
+Webhook delivery is transition-aware and retrying:
+
+- repeated `working -> working` or `waiting -> waiting` updates do not emit duplicate webhook events
+- agent activity emits `agent_started` when a session moves into working state and `agent_finished` when it moves into waiting state
+- transient webhook failures are retried with a short bounded backoff
+- Slack incoming webhooks receive a `text` payload and Discord webhooks receive a `content` payload
 
 ## Command Palette UX
 

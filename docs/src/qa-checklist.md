@@ -25,7 +25,7 @@ teardown = ["echo teardown-ran > .arbor-teardown.txt"]
 
 [notifications]
 desktop = true
-events = ["agent_finished", "agent_error"]
+events = ["agent_started", "agent_finished", "agent_error"]
 webhook_urls = ["http://127.0.0.1:9999/hook"]
 ```
 
@@ -128,8 +128,26 @@ Expected:
 - a POST request is sent
 - payload includes `event = "agent_finished"`
 - payload includes repo/worktree/cwd context
+- repeated waiting heartbeats for the same session do not create duplicate webhook posts
 
-## QA-07: Webhook Notification for `agent_error`
+## QA-07: Webhook Notification for `agent_started`
+
+Purpose: validate daemon-side webhook delivery when an agent starts working.
+
+Steps:
+
+1. Configure `[notifications].webhook_urls` to point at a local test server.
+2. Trigger an agent start event for a worktree.
+3. Capture the webhook request body.
+
+Expected:
+
+- a POST request is sent
+- payload includes `event = "agent_started"`
+- payload includes repo/worktree/cwd context
+- repeated working heartbeats for the same session do not create duplicate webhook posts
+
+## QA-08: Webhook Notification for `agent_error`
 
 Purpose: validate daemon-side webhook delivery for process crash/error.
 
@@ -144,8 +162,9 @@ Expected:
 - a POST request is sent
 - payload includes `event = "agent_error"`
 - payload includes process name / command / exit code
+- transient delivery failures are retried a small bounded number of times before Arbor gives up
 
-## QA-08: Command Palette Search Coverage
+## QA-09: Command Palette Search Coverage
 
 Purpose: validate all intended sources are searchable.
 
@@ -165,7 +184,7 @@ Expected:
 - each item type appears in search results
 - selecting a result runs the correct action
 
-## QA-09: Command Palette Keyboard Navigation
+## QA-10: Command Palette Keyboard Navigation
 
 Purpose: validate keyboard-first behavior.
 
@@ -183,7 +202,7 @@ Expected:
 - palette dismisses on `Escape`
 - selected item executes on `Enter`
 
-## QA-10: Command Palette Mouse Selection Only On Movement
+## QA-11: Command Palette Mouse Selection Only On Movement
 
 Purpose: validate opening the palette under a stationary cursor does not immediately change selection.
 
@@ -199,7 +218,7 @@ Expected:
 - initial selection remains keyboard/default selection on open
 - selection changes only after actual mouse movement
 
-## QA-11: Command Palette Overflow Indicator and Icons
+## QA-12: Command Palette Overflow Indicator and Icons
 
 Purpose: validate the visible affordances added for large result sets.
 
@@ -214,7 +233,7 @@ Expected:
 - a result count is visible
 - each row has an icon appropriate to its action type
 
-## QA-12: Theme Picker Keyboard Support
+## QA-13: Theme Picker Keyboard Support
 
 Purpose: validate full keyboard control of the theme modal.
 
@@ -232,7 +251,7 @@ Expected:
 - `Enter` applies the highlighted theme
 - `Escape` dismisses the modal
 
-## QA-13: Commit Modal Default and AI Message Flow
+## QA-14: Commit Modal Default and AI Message Flow
 
 Purpose: validate the enhanced commit experience.
 
@@ -250,7 +269,23 @@ Expected:
 - AI generation returns a message or clean fallback behavior
 - edited message is respected for the final commit
 
-## QA-14: Repo-Local Task Templates
+## QA-15: AI Commit Generation with Copilot
+
+Purpose: validate shared prompt-runner support for Copilot capture mode.
+
+Steps:
+
+1. Configure the active preset or a repo preset to use `copilot`.
+2. Open the commit modal on a worktree with changes.
+3. Trigger AI commit-message generation.
+
+Expected:
+
+- Arbor fills the commit message field with Copilot output
+- the UI stays in the commit modal instead of opening a fallback terminal flow
+- failures are surfaced as a modal error
+
+## QA-16: Repo-Local Task Templates
 
 Purpose: validate `.arbor/tasks/*.md` loading and execution.
 
@@ -283,7 +318,7 @@ Expected:
 - the configured/default agent is selected
 - the launched task passes the template prompt into the agent flow
 
-## QA-15: UI State Persistence
+## QA-17: UI State Persistence
 
 Purpose: validate supporting config/state changes.
 
@@ -298,7 +333,7 @@ Expected:
 - pane widths are restored
 - sidebar visibility is restored
 
-## QA-16: Docs Build
+## QA-18: Docs Build
 
 Purpose: validate the new HTML docs pipeline.
 

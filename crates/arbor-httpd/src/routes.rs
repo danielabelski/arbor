@@ -41,7 +41,7 @@ use {
         path::{Path, PathBuf},
         process::Command,
         sync::Arc,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     },
     tokio::sync::Mutex,
 };
@@ -848,13 +848,18 @@ pub(crate) async fn agent_notify(
         .unwrap_or_default()
         .as_millis() as u64;
     let session_id = request.session_id.clone();
+    let cwd_path = PathBuf::from(&request.cwd);
 
-    let dto = {
+    let (dto, previous_state) = {
         let mut sessions = state.agent_sessions.lock().await;
 
         // Expire stale sessions
         let cutoff = now_ms.saturating_sub(AGENT_SESSION_EXPIRY_SECS * 1000);
         sessions.retain(|_, session| session.updated_at_unix_ms > cutoff);
+
+        let previous_state = sessions
+            .get(&request.session_id)
+            .map(|session| session.state);
 
         sessions.insert(request.session_id, AgentSession {
             cwd: request.cwd.clone(),
@@ -862,14 +867,14 @@ pub(crate) async fn agent_notify(
             updated_at_unix_ms: now_ms,
         });
 
-        AgentSessionDto {
-            cwd: request.cwd,
-            state: match agent_state {
-                AgentState::Working => "working".to_owned(),
-                AgentState::Waiting => "waiting".to_owned(),
+        (
+            AgentSessionDto {
+                cwd: request.cwd,
+                state: agent_state_label(agent_state).to_owned(),
+                updated_at_unix_ms: now_ms,
             },
-            updated_at_unix_ms: now_ms,
-        }
+            previous_state,
+        )
     };
 
     tracing::info!(
@@ -877,20 +882,23 @@ pub(crate) async fn agent_notify(
         state = dto.state.as_str(),
         "agent session updated, broadcasting"
     );
-    if agent_state == AgentState::Waiting {
-        let cwd_path = PathBuf::from(&dto.cwd);
+    if let Some(event_name) =
+        notification_event_name_for_agent_transition(previous_state, agent_state)
+    {
         if let Ok(repo_root) = worktree::repo_root(&cwd_path) {
             let branch = git_branch_name_for_worktree(&cwd_path).ok();
             spawn_notification_webhooks(
                 repo_root.clone(),
-                "agent_finished",
+                event_name,
                 serde_json::json!({
-                    "event": "agent_finished",
+                    "event": event_name,
                     "repo_root": repo_root,
                     "worktree_path": cwd_path,
                     "cwd": dto.cwd.clone(),
                     "branch": branch,
                     "session_id": session_id,
+                    "state": agent_state_label(agent_state),
+                    "previous_state": previous_state.map(agent_state_label),
                     "timestamp_unix_ms": now_ms,
                 }),
             );
@@ -996,6 +1004,10 @@ pub(crate) fn spawn_notification_webhooks(
 
     tokio::spawn(async move {
         let _ = tokio::task::spawn_blocking(move || {
+            let http: ureq::Agent = ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(10)))
+                .build()
+                .into();
             for url in urls {
                 let body = match notification_webhook_request_body(&url, event_name, &payload) {
                     Ok(body) => body,
@@ -1010,16 +1022,86 @@ pub(crate) fn spawn_notification_webhooks(
                     },
                 };
 
-                let response = ureq::post(&url)
-                    .header("content-type", "application/json")
-                    .send(&body);
-                if let Err(error) = response {
-                    tracing::warn!(%error, %url, event = event_name, "notification webhook failed");
-                }
+                send_notification_webhook_with_retries(&http, &url, event_name, &body);
             }
         })
         .await;
     });
+}
+
+const NOTIFICATION_WEBHOOK_MAX_ATTEMPTS: usize = 3;
+const NOTIFICATION_WEBHOOK_RETRY_DELAYS_MS: [u64; NOTIFICATION_WEBHOOK_MAX_ATTEMPTS - 1] =
+    [300, 1_000];
+
+fn send_notification_webhook_with_retries(
+    http: &ureq::Agent,
+    url: &str,
+    event_name: &str,
+    body: &str,
+) {
+    for attempt in 0..NOTIFICATION_WEBHOOK_MAX_ATTEMPTS {
+        match send_notification_webhook_request(http, url, body) {
+            Ok(()) => return,
+            Err(error) => {
+                let Some(delay) = notification_webhook_retry_delay(attempt, &error) else {
+                    tracing::warn!(
+                        %error,
+                        %url,
+                        event = event_name,
+                        attempt = attempt + 1,
+                        "notification webhook failed"
+                    );
+                    return;
+                };
+
+                tracing::warn!(
+                    %error,
+                    %url,
+                    event = event_name,
+                    attempt = attempt + 1,
+                    retry_in_ms = delay.as_millis() as u64,
+                    "notification webhook failed; retrying"
+                );
+                std::thread::sleep(delay);
+            },
+        }
+    }
+}
+
+fn send_notification_webhook_request(
+    http: &ureq::Agent,
+    url: &str,
+    body: &str,
+) -> Result<(), ureq::Error> {
+    http.post(url)
+        .header("content-type", "application/json")
+        .send(body)
+        .map(|_| ())
+}
+
+fn notification_webhook_retry_delay(attempt: usize, error: &ureq::Error) -> Option<Duration> {
+    if !should_retry_notification_webhook(error) {
+        return None;
+    }
+
+    NOTIFICATION_WEBHOOK_RETRY_DELAYS_MS
+        .get(attempt)
+        .copied()
+        .map(Duration::from_millis)
+}
+
+fn should_retry_notification_webhook(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::StatusCode(status) => {
+            *status == 408 || *status == 409 || *status == 425 || *status == 429 || *status >= 500
+        },
+        ureq::Error::Timeout(_)
+        | ureq::Error::Io(_)
+        | ureq::Error::HostNotFound
+        | ureq::Error::Protocol(_)
+        | ureq::Error::ConnectionFailed => true,
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1068,6 +1150,19 @@ fn notification_webhook_text(event_name: &str, payload: &serde_json::Value) -> S
     let exit_code = payload.get("exit_code").and_then(serde_json::Value::as_i64);
 
     match event_name {
+        "agent_started" => {
+            let mut parts = vec!["Arbor agent started".to_owned()];
+            if let Some(branch) = branch {
+                parts.push(format!("branch `{branch}`"));
+            }
+            if let Some(worktree_path) = worktree_path.or(cwd) {
+                parts.push(format!("worktree `{worktree_path}`"));
+            }
+            if let Some(repo_root) = repo_root {
+                parts.push(format!("repo `{repo_root}`"));
+            }
+            parts.join(" · ")
+        },
         "agent_finished" => {
             let mut parts = vec!["Arbor agent finished".to_owned()];
             if let Some(branch) = branch {
@@ -1109,6 +1204,25 @@ fn notification_webhook_text(event_name: &str, payload: &serde_json::Value) -> S
 
 fn notification_payload_field<'a>(payload: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     payload.get(key).and_then(serde_json::Value::as_str)
+}
+
+fn notification_event_name_for_agent_transition(
+    previous_state: Option<AgentState>,
+    current_state: AgentState,
+) -> Option<&'static str> {
+    match (previous_state, current_state) {
+        (Some(AgentState::Working), AgentState::Working)
+        | (Some(AgentState::Waiting), AgentState::Waiting) => None,
+        (_, AgentState::Working) => Some("agent_started"),
+        (_, AgentState::Waiting) => Some("agent_finished"),
+    }
+}
+
+fn agent_state_label(state: AgentState) -> &'static str {
+    match state {
+        AgentState::Working => "working",
+        AgentState::Waiting => "waiting",
+    }
 }
 
 fn agent_session_snapshot(sessions: &mut HashMap<String, AgentSession>) -> Vec<AgentSessionDto> {
@@ -1828,6 +1942,72 @@ mod tests {
             Some(
                 "Arbor process error · process `web` · command `npm test` · exit 1 · repo `/tmp/repo`"
             )
+        );
+    }
+
+    #[test]
+    fn notification_webhook_text_formats_agent_started() {
+        let payload = serde_json::json!({
+            "event": "agent_started",
+            "repo_root": "/tmp/repo",
+            "worktree_path": "/tmp/repo-feature",
+            "branch": "feature/test"
+        });
+
+        assert_eq!(
+            notification_webhook_text("agent_started", &payload),
+            "Arbor agent started · branch `feature/test` · worktree `/tmp/repo-feature` · repo `/tmp/repo`"
+        );
+    }
+
+    #[test]
+    fn notification_event_name_tracks_agent_state_transitions() {
+        assert_eq!(
+            notification_event_name_for_agent_transition(None, AgentState::Working),
+            Some("agent_started")
+        );
+        assert_eq!(
+            notification_event_name_for_agent_transition(
+                Some(AgentState::Working),
+                AgentState::Waiting,
+            ),
+            Some("agent_finished")
+        );
+        assert_eq!(
+            notification_event_name_for_agent_transition(
+                Some(AgentState::Waiting),
+                AgentState::Waiting,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn notification_webhook_retry_policy_retries_transient_status_codes() {
+        assert!(should_retry_notification_webhook(&ureq::Error::StatusCode(
+            429
+        )));
+        assert!(should_retry_notification_webhook(&ureq::Error::StatusCode(
+            503
+        )));
+        assert!(!should_retry_notification_webhook(
+            &ureq::Error::StatusCode(400)
+        ));
+    }
+
+    #[test]
+    fn notification_webhook_retry_delay_is_bounded() {
+        assert_eq!(
+            notification_webhook_retry_delay(0, &ureq::Error::StatusCode(503)),
+            Some(Duration::from_millis(300))
+        );
+        assert_eq!(
+            notification_webhook_retry_delay(1, &ureq::Error::StatusCode(503)),
+            Some(Duration::from_millis(1_000))
+        );
+        assert_eq!(
+            notification_webhook_retry_delay(2, &ureq::Error::StatusCode(503)),
+            None
         );
     }
 }

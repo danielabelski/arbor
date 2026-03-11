@@ -106,6 +106,7 @@ impl ArborWindow {
         };
         let changed_files = self.changed_files.clone();
         let preset = self.active_preset_tab.unwrap_or(AgentPresetKind::Codex);
+        let command = self.preset_command_for_kind(preset);
 
         if let Some(modal) = self.commit_modal.as_mut() {
             modal.generating = true;
@@ -115,7 +116,12 @@ impl ArborWindow {
 
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move {
-                generate_commit_message_with_ai(worktree_path.as_path(), &changed_files, preset)
+                generate_commit_message_with_ai(
+                    worktree_path.as_path(),
+                    &changed_files,
+                    preset,
+                    &command,
+                )
             });
             let result = result.await;
 
@@ -409,52 +415,16 @@ fn generate_commit_message_with_ai(
     worktree_path: &Path,
     changed_files: &[ChangedFile],
     preset: AgentPresetKind,
+    command: &str,
 ) -> Result<String, String> {
     let prompt = build_commit_message_prompt(changed_files);
-
-    let output = match preset {
-        AgentPresetKind::Claude => run_command_output(
-            Command::new("claude")
-                .current_dir(worktree_path)
-                .arg("--print")
-                .arg(&prompt),
-            "claude commit message generation",
-        ),
-        AgentPresetKind::Codex => run_command_output(
-            Command::new("codex")
-                .current_dir(worktree_path)
-                .arg("exec")
-                .arg(&prompt),
-            "codex commit message generation",
-        ),
-        AgentPresetKind::OpenCode => run_command_output(
-            Command::new("opencode")
-                .current_dir(worktree_path)
-                .arg("run")
-                .arg(&prompt),
-            "opencode commit message generation",
-        ),
-        AgentPresetKind::Pi | AgentPresetKind::Copilot => {
-            return Err(format!(
-                "{} does not support non-interactive commit generation yet",
-                preset.label()
-            ));
-        },
-    }?;
-
-    if !output.status.success() {
-        return Err(command_failure_message(
-            "commit message generation",
-            &output,
-        ));
-    }
-
-    let message = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if message.is_empty() {
-        return Err("AI commit message generation returned empty output".to_owned());
-    }
-
-    Ok(message)
+    run_prompt_capture(
+        worktree_path,
+        preset,
+        command,
+        &prompt,
+        "commit message generation",
+    )
 }
 
 fn build_commit_message_prompt(changed_files: &[ChangedFile]) -> String {
