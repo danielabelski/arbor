@@ -3170,12 +3170,48 @@ pub(crate) fn render_file_view_session(
         .child(body)
 }
 
+/// Reverse lookup: find the file whose start row is <= `row_index` and is
+/// the maximum such value. Returns the file path.
+pub(crate) fn file_path_for_diff_row(
+    file_row_indices: &HashMap<PathBuf, usize>,
+    row_index: usize,
+) -> Option<PathBuf> {
+    file_row_indices
+        .iter()
+        .filter(|(_, start)| **start <= row_index)
+        .max_by_key(|(_, start)| **start)
+        .map(|(path, _)| path.clone())
+}
+
+/// Runs `git rev-parse HEAD` to get the commit SHA for posting review comments.
+pub(crate) fn head_commit_sha(worktree_path: &Path) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worktree_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run git rev-parse: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git rev-parse HEAD failed: {stderr}"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 pub(crate) fn render_diff_session(
     session: DiffSession,
     theme: ThemePalette,
     scroll_handle: &UniformListScrollHandle,
     mono_font: gpui::Font,
     diff_cell_width: f32,
+    on_comment_click: Option<Arc<dyn Fn(usize, usize, &mut App) + 'static>>,
+    pending_comment: Option<&PendingComment>,
+    on_comment_submit: Option<Arc<dyn Fn(&mut App) + 'static>>,
+    on_comment_cancel: Option<Arc<dyn Fn(&mut App) + 'static>>,
 ) -> Div {
     let path_label = truncate_middle_text(&session.title, 84);
     let line_count = session.lines.len();
@@ -3241,6 +3277,7 @@ pub(crate) fn render_diff_session(
                     let zonemap_lines = lines.clone();
                     let scroll_handle = scroll_handle.clone();
                     let mono_font = mono_font.clone();
+                    let on_comment_click = on_comment_click.clone();
                     this.child(
                         div()
                             .size_full()
@@ -3260,6 +3297,7 @@ pub(crate) fn render_diff_session(
                                                     theme,
                                                     mono_font.clone(),
                                                     diff_cell_width,
+                                                    on_comment_click.clone(),
                                                 )
                                             })
                                             .collect::<Vec<_>>()
@@ -3274,6 +3312,83 @@ pub(crate) fn render_diff_session(
                     )
                 }),
         )
+        .when_some(pending_comment.cloned(), |this, pc| {
+            let label = format!("{}:{}", pc.file_path.display(), pc.line);
+            let submit_cb = on_comment_submit.clone();
+            let cancel_cb = on_comment_cancel.clone();
+            this.child(
+                div()
+                    .flex_none()
+                    .h(px(36.))
+                    .w_full()
+                    .border_t_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.panel_bg))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .child(active_input_display(
+                                theme,
+                                &pc.text,
+                                "Add a comment...",
+                                theme.text_primary,
+                                pc.text_cursor,
+                                120,
+                            )),
+                    )
+                    .child(
+                        action_button(
+                            theme,
+                            "comment-submit",
+                            if pc.submitting {
+                                "Posting..."
+                            } else {
+                                "Submit"
+                            },
+                            ActionButtonStyle::Primary,
+                            !pc.text.trim().is_empty() && !pc.submitting,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            move |_, _, app| {
+                                if let Some(cb) = &submit_cb {
+                                    cb(app);
+                                }
+                            },
+                        ),
+                    )
+                    .child(
+                        action_button(
+                            theme,
+                            "comment-cancel",
+                            "Cancel",
+                            ActionButtonStyle::Secondary,
+                            !pc.submitting,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            move |_, _, app| {
+                                if let Some(cb) = &cancel_cb {
+                                    cb(app);
+                                }
+                            },
+                        ),
+                    ),
+            )
+        })
 }
 
 pub(crate) fn render_diff_row(
@@ -3283,6 +3398,7 @@ pub(crate) fn render_diff_row(
     theme: ThemePalette,
     mono_font: gpui::Font,
     diff_cell_width: f32,
+    on_comment_click: Option<Arc<dyn Fn(usize, usize, &mut App) + 'static>>,
 ) -> impl IntoElement {
     if line.kind == DiffLineKind::FileHeader {
         return div()
@@ -3369,6 +3485,7 @@ pub(crate) fn render_diff_row(
     let (left_text_color, right_text_color) = diff_line_text_colors(line.kind, theme);
     div()
         .id(diff_row_element_id("diff-row", session_id, row_index))
+        .group("diff-row")
         .w_full()
         .min_w_0()
         .h(px(DIFF_ROW_HEIGHT_PX))
@@ -3386,6 +3503,7 @@ pub(crate) fn render_diff_row(
             theme,
             mono_font.clone(),
             diff_cell_width,
+            on_comment_click.clone(),
         ))
         .child(render_diff_column(
             session_id,
@@ -3399,6 +3517,7 @@ pub(crate) fn render_diff_row(
             theme,
             mono_font,
             diff_cell_width,
+            on_comment_click,
         ))
 }
 
@@ -3414,12 +3533,19 @@ pub(crate) fn render_diff_column(
     theme: ThemePalette,
     mono_font: gpui::Font,
     diff_cell_width: f32,
+    on_comment_click: Option<Arc<dyn Fn(usize, usize, &mut App) + 'static>>,
 ) -> impl IntoElement {
     let number_width = px((DIFF_LINE_NUMBER_WIDTH_CHARS as f32 * diff_cell_width) + 12.);
 
     let column_id = diff_row_side_element_id("diff-column", session_id, row_index, side);
     let marker_id = diff_row_side_element_id("diff-marker", session_id, row_index, side);
     let text_id = diff_row_side_element_id("diff-text", session_id, row_index, side);
+    let plus_id = diff_row_side_element_id("diff-plus", session_id, row_index, side);
+
+    let show_plus = on_comment_click.is_some() && line_number.is_some();
+
+    let dblclick_cb = on_comment_click.clone();
+    let has_dblclick = dblclick_cb.is_some() && line_number.is_some();
 
     div()
         .id(column_id)
@@ -3427,6 +3553,15 @@ pub(crate) fn render_diff_column(
         .min_w_0()
         .h_full()
         .bg(rgb(background))
+        .when(has_dblclick, |this| {
+            this.on_mouse_down(MouseButton::Left, move |event, _, app| {
+                if event.click_count == 2
+                    && let Some(cb) = &dblclick_cb
+                {
+                    cb(row_index, side, app);
+                }
+            })
+        })
         .child(
             div()
                 .h_full()
@@ -3439,10 +3574,44 @@ pub(crate) fn render_diff_column(
                     div()
                         .w(number_width)
                         .flex_none()
-                        .text_right()
-                        .text_size(px(DIFF_FONT_SIZE_PX))
-                        .text_color(rgb(theme.text_disabled))
-                        .child(line_number.map_or(String::new(), |line| line.to_string())),
+                        .flex()
+                        .items_center()
+                        .gap(px(2.))
+                        .child(if show_plus {
+                            let cb = on_comment_click.clone();
+                            div()
+                                .id(plus_id)
+                                .flex_none()
+                                .w(px(14.))
+                                .h(px(14.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(10.))
+                                .text_color(rgb(theme.text_muted))
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .opacity(0.)
+                                .group_hover("diff-row", |s| {
+                                    s.opacity(1.).bg(rgb(theme.panel_active_bg))
+                                })
+                                .child("+")
+                                .on_mouse_down(MouseButton::Left, move |_, _, app| {
+                                    if let Some(cb) = &cb {
+                                        cb(row_index, side, app);
+                                    }
+                                })
+                        } else {
+                            div().id(plus_id).flex_none().w(px(14.))
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_right()
+                                .text_size(px(DIFF_FONT_SIZE_PX))
+                                .text_color(rgb(theme.text_disabled))
+                                .child(line_number.map_or(String::new(), |line| line.to_string())),
+                        ),
                 )
                 .child(
                     div()

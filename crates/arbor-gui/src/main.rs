@@ -187,6 +187,7 @@ struct ArborWindow {
     terminal_poll_rx: Option<std::sync::mpsc::Receiver<()>>,
     diff_sessions: Vec<DiffSession>,
     active_diff_session_id: Option<u64>,
+    pending_comment: Option<PendingComment>,
     file_view_sessions: Vec<FileViewSession>,
     active_file_view_session_id: Option<u64>,
     next_file_view_session_id: u64,
@@ -432,6 +433,7 @@ impl ArborWindow {
                     terminal_poll_rx: Some(terminal_poll_rx),
                     diff_sessions: Vec::new(),
                     active_diff_session_id: None,
+                    pending_comment: None,
                     file_view_sessions: Vec::new(),
                     active_file_view_session_id: None,
                     next_file_view_session_id: 1,
@@ -758,6 +760,7 @@ impl ArborWindow {
             terminal_poll_rx: Some(terminal_poll_rx),
             diff_sessions: Vec::new(),
             active_diff_session_id: None,
+            pending_comment: None,
             file_view_sessions: Vec::new(),
             active_file_view_session_id: None,
             next_file_view_session_id: 1,
@@ -2270,6 +2273,136 @@ impl ArborWindow {
             session.file_row_indices = wrapped_indices;
             session.wrapped_columns = wrap_columns;
         }
+    }
+
+    fn start_inline_comment(
+        &mut self,
+        session_id: u64,
+        row_index: usize,
+        side: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let session = match self.diff_sessions.iter().find(|s| s.id == session_id) {
+            Some(s) => s,
+            None => return,
+        };
+
+        let line = match session.lines.get(row_index) {
+            Some(l) => l,
+            None => return,
+        };
+
+        let line_number = if side == 1 {
+            line.right_line_number
+        } else {
+            line.left_line_number
+        };
+
+        let Some(line_number) = line_number else {
+            return;
+        };
+
+        let file_path = match file_path_for_diff_row(&session.file_row_indices, row_index) {
+            Some(p) => p,
+            None => return,
+        };
+
+        let diff_side = if side == 1 {
+            github_service::DiffSide::Right
+        } else {
+            github_service::DiffSide::Left
+        };
+
+        self.pending_comment = Some(PendingComment {
+            session_id,
+            file_path,
+            line: line_number,
+            side: diff_side,
+            text: String::new(),
+            text_cursor: 0,
+            submitting: false,
+        });
+        cx.notify();
+    }
+
+    fn submit_inline_comment(&mut self, cx: &mut Context<Self>) {
+        // Check preconditions and extract values before mutating
+        let pc = match self.pending_comment.as_ref() {
+            Some(pc) if !pc.text.trim().is_empty() && !pc.submitting => pc,
+            _ => return,
+        };
+        let file_path = pc.file_path.display().to_string();
+        let line = pc.line;
+        let side = pc.side;
+        let body = pc.text.clone();
+
+        let worktree = match self.active_worktree() {
+            Some(w) => w,
+            None => return,
+        };
+        let pr_number = match worktree.pr_number {
+            Some(n) => n,
+            None => return,
+        };
+        let repo_slug = match self.github_repo_slug.clone() {
+            Some(s) => s,
+            None => return,
+        };
+        let worktree_path = worktree.path.clone();
+
+        let commit_sha = match head_commit_sha(&worktree_path) {
+            Ok(sha) => sha,
+            Err(error) => {
+                self.notice = Some(format!("failed to get HEAD SHA: {error}"));
+                cx.notify();
+                return;
+            },
+        };
+
+        // Now mark as submitting
+        if let Some(pc) = self.pending_comment.as_mut() {
+            pc.submitting = true;
+        }
+        let review_service = self.review_service.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    review_service.post_review_comment(
+                        &repo_slug,
+                        pr_number,
+                        &file_path,
+                        line,
+                        side,
+                        &body,
+                        &commit_sha,
+                    )
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => {
+                        this.pending_comment = None;
+                        this.refresh_review_threads_for_worktree(cx);
+                    },
+                    Err(error) => {
+                        this.notice = Some(format!("failed to post comment: {error}"));
+                        if let Some(pc) = this.pending_comment.as_mut() {
+                            pc.submitting = false;
+                        }
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn cancel_inline_comment(&mut self, cx: &mut Context<Self>) {
+        self.pending_comment = None;
+        cx.notify();
     }
 
     fn refresh_pr_changed_files(&mut self, cx: &mut Context<Self>) {
@@ -7815,6 +7948,30 @@ impl ArborWindow {
             return;
         }
 
+        if self.pending_comment.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.cancel_inline_comment(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "enter" | "return" => {
+                    self.submit_inline_comment(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+            if let Some(action) = text_edit_action_for_event(event, cx) {
+                if let Some(pc) = self.pending_comment.as_mut() {
+                    apply_text_edit_action(&mut pc.text, &mut pc.text_cursor, &action);
+                }
+                cx.notify();
+                cx.stop_propagation();
+            }
+            return;
+        }
+
         let active_tab = self.active_center_tab_for_selected_worktree();
 
         // Handle file view editing before terminal input
@@ -11209,12 +11366,58 @@ impl ArborWindow {
                     .when_some(active_diff_session, |this, session| {
                         let mono_font = terminal_mono_font(cx);
                         let diff_cell_width = diff_cell_width_px(cx);
+                        let is_pr_mode =
+                            self.changes_view_mode == ChangesViewMode::PrChanges;
+                        let on_comment_click: Option<
+                            Arc<dyn Fn(usize, usize, &mut App) + 'static>,
+                        > = if is_pr_mode {
+                            let session_id = session.id;
+                            let entity = cx.entity().clone();
+                            Some(Arc::new(
+                                move |row_index: usize, side: usize, app: &mut App| {
+                                    entity.update(app, |this, cx| {
+                                        this.start_inline_comment(
+                                            session_id, row_index, side, cx,
+                                        );
+                                    });
+                                },
+                            ))
+                        } else {
+                            None
+                        };
+                        let pending = self.pending_comment.as_ref();
+                        let on_submit: Option<Arc<dyn Fn(&mut App) + 'static>> =
+                            if pending.is_some() {
+                                let entity = cx.entity().clone();
+                                Some(Arc::new(move |app: &mut App| {
+                                    entity.update(app, |this, cx| {
+                                        this.submit_inline_comment(cx);
+                                    });
+                                }))
+                            } else {
+                                None
+                            };
+                        let on_cancel: Option<Arc<dyn Fn(&mut App) + 'static>> =
+                            if pending.is_some() {
+                                let entity = cx.entity().clone();
+                                Some(Arc::new(move |app: &mut App| {
+                                    entity.update(app, |this, cx| {
+                                        this.cancel_inline_comment(cx);
+                                    });
+                                }))
+                            } else {
+                                None
+                            };
                         this.child(render_diff_session(
                             session,
                             theme,
                             &self.diff_scroll_handle,
                             mono_font,
                             diff_cell_width,
+                            on_comment_click,
+                            pending,
+                            on_submit,
+                            on_cancel,
                         ))
                     })
                     .when_some(active_file_view_session, |this, session| {

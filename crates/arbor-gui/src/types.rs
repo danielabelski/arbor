@@ -1,7 +1,7 @@
 use {
     crate::{
         checkout::CheckoutKind,
-        github_service,
+        github_service::{self, DiffSide},
         terminal_backend::{TerminalCursor, TerminalModes, TerminalStyledLine},
         terminal_daemon_http,
         terminal_runtime::SharedTerminalRuntime,
@@ -833,4 +833,16 @@ pub(crate) struct RemoteDaemonState {
 pub(crate) struct ActiveRemoteWorktree {
     pub(crate) daemon_index: usize,
     pub(crate) worktree_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingComment {
+    #[allow(dead_code)]
+    pub(crate) session_id: u64,
+    pub(crate) file_path: PathBuf,
+    pub(crate) line: usize,
+    pub(crate) side: DiffSide,
+    pub(crate) text: String,
+    pub(crate) text_cursor: usize,
+    pub(crate) submitting: bool,
 }
