@@ -1,6 +1,7 @@
 use {
     crate::{
         github_service::GitHubPrService,
+        process_manager::ProcessEvent,
         repository_store,
         terminal_daemon::{LocalTerminalDaemonError, SessionEvent},
         types::*,
@@ -868,17 +869,12 @@ pub(crate) async fn agent_activity_ws(
 }
 
 async fn handle_agent_activity_ws(state: AppState, mut socket: WebSocket) {
-    let snapshot = {
-        let mut sessions = state.agent_sessions.lock().await;
-        let dtos = agent_session_snapshot(&mut sessions);
-        AgentWsEvent::Snapshot { sessions: dtos }
-    };
+    let (snapshot, mut rx) = agent_activity_snapshot_and_subscription(&state).await;
 
     if send_ws_json(&mut socket, &snapshot).await.is_err() {
         return;
     }
 
-    let mut rx = state.agent_broadcast.subscribe();
     loop {
         match rx.recv().await {
             Ok(event) => {
@@ -886,10 +882,28 @@ async fn handle_agent_activity_ws(state: AppState, mut socket: WebSocket) {
                     break;
                 }
             },
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                let (snapshot, next_rx) = agent_activity_snapshot_and_subscription(&state).await;
+                if send_ws_json(&mut socket, &snapshot).await.is_err() {
+                    break;
+                }
+                rx = next_rx;
+            },
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     }
+}
+
+async fn agent_activity_snapshot_and_subscription(
+    state: &AppState,
+) -> (AgentWsEvent, tokio::sync::broadcast::Receiver<AgentWsEvent>) {
+    let snapshot = {
+        let mut sessions = state.agent_sessions.lock().await;
+        let dtos = agent_session_snapshot(&mut sessions);
+        AgentWsEvent::Snapshot { sessions: dtos }
+    };
+
+    (snapshot, state.agent_broadcast.subscribe())
 }
 
 pub(crate) async fn send_ws_json(socket: &mut WebSocket, value: &impl Serialize) -> Result<(), ()> {
@@ -997,10 +1011,7 @@ pub(crate) async fn process_status_ws(
 }
 
 async fn handle_process_status_ws(state: AppState, mut socket: WebSocket) {
-    let (snapshot, mut rx) = {
-        let pm = state.process_manager.lock().await;
-        (pm.snapshot_event(), pm.subscribe())
-    };
+    let (snapshot, mut rx) = process_status_snapshot_and_subscription(&state).await;
 
     if send_ws_json(&mut socket, &snapshot).await.is_err() {
         return;
@@ -1013,10 +1024,23 @@ async fn handle_process_status_ws(state: AppState, mut socket: WebSocket) {
                     break;
                 }
             },
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                let (snapshot, next_rx) = process_status_snapshot_and_subscription(&state).await;
+                if send_ws_json(&mut socket, &snapshot).await.is_err() {
+                    break;
+                }
+                rx = next_rx;
+            },
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     }
+}
+
+async fn process_status_snapshot_and_subscription(
+    state: &AppState,
+) -> (ProcessEvent, tokio::sync::broadcast::Receiver<ProcessEvent>) {
+    let pm = state.process_manager.lock().await;
+    (pm.snapshot_event(), pm.subscribe())
 }
 
 // ── Log streaming ────────────────────────────────────────────────────
@@ -1044,7 +1068,14 @@ async fn handle_logs_ws(state: AppState, mut socket: WebSocket) {
                     "message": format!("log stream lagged, skipped {n} entries"),
                     "fields": "",
                 });
-                let _ = socket.send(Message::Text(msg.to_string().into())).await;
+                if socket
+                    .send(Message::Text(msg.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                rx = state.log_broadcast.subscribe();
             },
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
