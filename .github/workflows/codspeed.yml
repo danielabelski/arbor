@@ -115,4 +115,4 @@ jobs:
         uses: CodSpeedHQ/action@281164b0f014a4e7badd2c02cecad9b595b70537 # v4.11.1
         with:
           mode: simulation
-          run: cargo codspeed run -p arbor-benchmarks --features ghostty-vt-experimental --bench embedded_terminal
+          run: cargo codspeed run -p arbor-benchmarks --bench embedded_terminal
