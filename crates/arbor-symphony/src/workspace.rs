@@ -220,15 +220,16 @@ mod tests {
     #[tokio::test]
     async fn creates_workspace_and_runs_hook() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let marker = temp.path().join("marker.txt");
+        let marker_name = "marker.txt";
         let manager = WorkspaceManager::new(temp.path().to_path_buf(), HookScripts {
-            after_create: Some(format!("touch {}", marker.display())),
+            after_create: Some(format!(": > {marker_name}")),
             timeout_ms: 1_000,
             ..HookScripts::default()
         });
 
         let workspace = manager.ensure_workspace("ARB-1").await.expect("workspace");
         assert!(workspace.path.exists());
+        let marker = workspace.path.join(marker_name);
         assert!(marker.exists());
     }
 }

@@ -25,7 +25,7 @@ use {
 };
 
 fn router(state: AppState) -> Router {
-    let mut api = Router::new()
+    let api = Router::new()
         .route("/health", get(health))
         .route("/repositories", get(list_repositories))
         .route("/worktrees", get(list_worktrees).post(create_worktree))
@@ -59,12 +59,13 @@ fn router(state: AppState) -> Router {
         .route("/logs/ws", get(logs_ws));
 
     #[cfg(feature = "symphony")]
-    {
-        api = api
-            .route("/symphony/state", get(symphony_state))
-            .route("/symphony/refresh", post(symphony_refresh))
-            .route("/symphony/{issue_identifier}", get(symphony_issue));
-    }
+    let api = api
+        .route("/symphony/state", get(symphony_state))
+        .route("/symphony/refresh", post(symphony_refresh))
+        .route("/symphony/{issue_identifier}", get(symphony_issue));
+
+    #[cfg(not(feature = "symphony"))]
+    let api = api;
 
     let with_state = Router::new().nest("/api/v1", api).with_state(state);
 
@@ -330,9 +331,9 @@ mod tests {
         arbor_core::daemon::{CreateOrAttachRequest, KillRequest, TerminalDaemon},
         axum::{
             Json,
-            body::{Body, Bytes, to_bytes},
+            body::Bytes,
             extract::{Path as AxumPath, State, ws::Message},
-            http::{Request, StatusCode},
+            http::StatusCode,
         },
         std::time::Duration,
     };
@@ -344,6 +345,10 @@ mod tests {
             codex::{RunAttemptRequest, RunOutcome, RunResult, Runner, RunnerError, RunnerEvent},
         },
         async_trait::async_trait,
+        axum::{
+            body::{Body, to_bytes},
+            http::Request,
+        },
         std::sync::{Arc, Mutex as StdMutex},
         tower::ServiceExt,
     };
