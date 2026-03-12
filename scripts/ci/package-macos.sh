@@ -48,7 +48,7 @@ else
 fi
 
 # Bundle arbor CLI for scripting and automation.
-CLI_PATH="$(dirname "${BINARY_PATH}")/arbor"
+CLI_PATH="$(dirname "${BINARY_PATH}")/arbor-cli"
 if [[ -f "${CLI_PATH}" ]]; then
   # Keep the CLI out of Contents/MacOS so it does not collide with the main
   # Arbor executable on case-insensitive macOS filesystems.

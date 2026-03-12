@@ -183,8 +183,8 @@ jobs:
             target/x86_64-apple-darwin/release/arbor-mcp \
             -output dist/arbor-mcp
           lipo -create \
-            target/aarch64-apple-darwin/release/arbor \
-            target/x86_64-apple-darwin/release/arbor \
+            target/aarch64-apple-darwin/release/arbor-cli \
+            target/x86_64-apple-darwin/release/arbor-cli \
             -output dist/arbor
           ./scripts/ci/package-macos.sh "$TAG" "universal2-apple-darwin" "dist/Arbor" "dist"
       - name: Import signing certificate

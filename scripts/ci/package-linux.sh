@@ -45,7 +45,7 @@ else
 fi
 
 # Bundle arbor CLI for scripting and automation.
-CLI_PATH="$(dirname "${BINARY_PATH}")/arbor"
+CLI_PATH="$(dirname "${BINARY_PATH}")/arbor-cli"
 if [[ -f "${CLI_PATH}" ]]; then
   install -m 0755 "${CLI_PATH}" "${STAGING_DIR}/bin/arbor"
   echo "bundled arbor CLI from ${CLI_PATH}"

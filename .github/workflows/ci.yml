@@ -307,6 +307,15 @@ jobs:
           fi
           echo "Signing with identity: $IDENTITY"
 
+          CLI_BIN="${APP_PATH}/Contents/Helpers/arbor"
+
+          if [[ -f "${CLI_BIN}" ]]; then
+            /usr/bin/codesign --force --timestamp --options runtime \
+                --entitlements packaging/macos/Arbor.entitlements \
+                --sign "$IDENTITY" \
+                "${CLI_BIN}" -v
+          fi
+
           /usr/bin/codesign --force --timestamp --options runtime \
               --entitlements packaging/macos/Arbor.entitlements \
               --sign "$IDENTITY" \
