@@ -7,7 +7,11 @@ pub use types::{
     TerminalSignalRequest, WorktreeDto, WorktreeMutationResponse,
 };
 use {
-    arbor_core::{daemon::TerminalSnapshot, process::ProcessInfo},
+    arbor_core::{
+        daemon::TerminalSnapshot,
+        process::ProcessInfo,
+        task::{TaskExecution, TaskInfo},
+    },
     serde::{Serialize, de::DeserializeOwned},
     std::{env, path::PathBuf},
     thiserror::Error,
@@ -275,6 +279,21 @@ impl DaemonClient {
         self.post_empty_json("/api/v1/symphony/refresh")
     }
 
+    pub fn list_tasks(&self) -> Result<Vec<TaskInfo>, DaemonClientError> {
+        self.get_json("/api/v1/tasks")
+    }
+
+    pub fn run_task(&self, name: &str) -> Result<TaskInfo, DaemonClientError> {
+        self.post_empty_json(&format!("/api/v1/tasks/{}/run", encode_path_segment(name)))
+    }
+
+    pub fn task_history(&self, name: &str) -> Result<Vec<TaskExecution>, DaemonClientError> {
+        self.get_json(&format!(
+            "/api/v1/tasks/{}/history",
+            encode_path_segment(name)
+        ))
+    }
+
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, DaemonClientError> {
         let response = self
             .get_request(path)
@@ -496,7 +515,7 @@ pub fn read_json_text_resource<T: Serialize>(value: &T) -> Result<String, Daemon
         .map_err(|error| DaemonClientError::Decode(error.to_string()))
 }
 
-pub fn default_mcp_resources() -> [(&'static str, &'static str, &'static str); 6] {
+pub fn default_mcp_resources() -> [(&'static str, &'static str, &'static str); 7] {
     [
         ("arbor://health", "health", "Daemon health and version"),
         (
@@ -510,6 +529,7 @@ pub fn default_mcp_resources() -> [(&'static str, &'static str, &'static str); 6
             "Current worktree snapshot",
         ),
         ("arbor://processes", "processes", "Managed process snapshot"),
+        ("arbor://tasks", "tasks", "Scheduled task snapshot"),
         (
             "arbor://terminals",
             "terminals",

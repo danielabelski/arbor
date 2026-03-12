@@ -213,6 +213,7 @@ pub(crate) struct AppState {
     pub(crate) process_manager: Arc<Mutex<crate::process_manager::ProcessManager>>,
     #[cfg(feature = "symphony")]
     pub(crate) symphony: Option<arbor_symphony::ServiceHandle>,
+    pub(crate) task_scheduler: Arc<Mutex<crate::task_scheduler::TaskScheduler>>,
     pub(crate) github_service: Arc<dyn crate::github_service::GitHubPrService>,
     pub(crate) agent_sessions: Arc<Mutex<HashMap<String, AgentSession>>>,
     pub(crate) agent_broadcast: tokio::sync::broadcast::Sender<AgentWsEvent>,
