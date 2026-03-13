@@ -1272,6 +1272,7 @@ impl ArborWindow {
         } else {
             outpost_create_disabled
         };
+        let modal_body_max_height = px(460.);
         let creating_status = modal.creating_status.clone();
         let submit_label: String = if modal.is_creating {
             creating_status.as_deref().unwrap_or("Creating…").to_owned()
@@ -1310,6 +1311,7 @@ impl ArborWindow {
                 div()
                     .w(px(620.))
                     .max_w(px(620.))
+                    .h_auto()
                     .flex_none()
                     .overflow_hidden()
                     .rounded_md()
@@ -1438,622 +1440,639 @@ impl ArborWindow {
                                 )
                             }),
                     )
-                    // Local Worktree tab content
-                    .when(is_worktree_tab, |this| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(rgb(theme.text_muted))
-                                .child(if daemon_managed_worktree {
-                                    "Managed worktrees are created by the daemon under ~/.arbor/worktrees/<repo>/<worktree>/."
-                                } else {
-                                    "Target base: ~/.arbor/worktrees/<repo>/<worktree>/"
-                                }),
-                        )
-                        .when_some(issue_context.clone(), |this, issue| {
-                            this.child(
+                    .child(
+                        div()
+                            .id("create-modal-body")
+                            .flex_none()
+                            .min_h_0()
+                            .max_h(modal_body_max_height)
+                            .overflow_y_scroll()
+                            .pr_1()
+                            .child(
                                 div()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(rgb(theme.border))
-                                    .bg(rgb(theme.panel_bg))
-                                    .p_2()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(4.))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .font_family(FONT_MONO)
-                                                    .text_color(rgb(theme.accent))
-                                                    .child(issue.display_id),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(rgb(theme.text_muted))
-                                                    .child(issue.source_label),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(theme.text_primary))
-                                            .child(issue.title),
-                                    )
-                                    .when_some(issue.url, |this, url| {
+                                    .gap_2()
+                                    // Local Worktree tab content
+                                    .when(is_worktree_tab, |this| {
                                         this.child(
                                             div()
+                                                .flex_none()
                                                 .text_xs()
-                                                .font_family(FONT_MONO)
                                                 .text_color(rgb(theme.text_muted))
-                                                .child(url),
+                                                .child(if daemon_managed_worktree {
+                                                    "Managed worktrees are created by the daemon under ~/.arbor/worktrees/<repo>/<worktree>/."
+                                                } else {
+                                                    "Target base: ~/.arbor/worktrees/<repo>/<worktree>/"
+                                                }),
+                                        )
+                                        .when_some(issue_context.clone(), |this, issue| {
+                                            this.child(
+                                                div()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(rgb(theme.border))
+                                                    .bg(rgb(theme.panel_bg))
+                                                    .p_2()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_between()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .font_family(FONT_MONO)
+                                                                    .text_color(rgb(theme.accent))
+                                                                    .child(issue.display_id),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(theme.text_muted))
+                                                                    .child(issue.source_label),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(rgb(theme.text_primary))
+                                                            .child(issue.title),
+                                                    )
+                                                    .when_some(issue.url, |this, url| {
+                                                        this.child(
+                                                            div()
+                                                                .text_xs()
+                                                                .font_family(FONT_MONO)
+                                                                .text_color(rgb(theme.text_muted))
+                                                                .child(url),
+                                                        )
+                                                    }),
+                                            )
+                                        })
+                                        .when(!daemon_managed_worktree, |this| {
+                                            this.child(
+                                                div()
+                                                    .flex_none()
+                                                    .id("create-discrete-clone-checkbox")
+                                                    .cursor_pointer()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(rgb(if is_discrete_clone {
+                                                        theme.accent
+                                                    } else {
+                                                        theme.border
+                                                    }))
+                                                    .bg(rgb(theme.panel_bg))
+                                                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                                    .px_2()
+                                                    .py_2()
+                                                    .flex()
+                                                    .items_start()
+                                                    .gap_2()
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        let next_kind = if is_discrete_clone {
+                                                            CheckoutKind::LinkedWorktree
+                                                        } else {
+                                                            CheckoutKind::DiscreteClone
+                                                        };
+                                                        this.set_create_modal_checkout_kind(next_kind, cx);
+                                                    }))
+                                                    .child(
+                                                        div()
+                                                            .mt(px(1.))
+                                                            .w(px(14.))
+                                                            .h(px(14.))
+                                                            .rounded_sm()
+                                                            .border_1()
+                                                            .border_color(rgb(if is_discrete_clone {
+                                                                theme.accent
+                                                            } else {
+                                                                theme.border
+                                                            }))
+                                                            .bg(rgb(if is_discrete_clone {
+                                                                theme.accent
+                                                            } else {
+                                                                theme.panel_bg
+                                                            }))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .child(
+                                                                div()
+                                                                    .font_family(FONT_MONO)
+                                                                    .text_size(px(9.))
+                                                                    .text_color(rgb(if is_discrete_clone {
+                                                                        theme.sidebar_bg
+                                                                    } else {
+                                                                        theme.panel_bg
+                                                                    }))
+                                                                    .child(if is_discrete_clone {
+                                                                        "\u{f00c}"
+                                                                    } else {
+                                                                        ""
+                                                                    }),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(2.))
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                                    .text_color(rgb(theme.text_primary))
+                                                                    .child("Discrete clone"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(theme.text_muted))
+                                                                    .child(checkout_kind.description()),
+                                                            ),
+                                                    ),
+                                            )
+                                        })
+                                        .child(
+                                            modal_input_field(
+                                                theme,
+                                                "create-worktree-repo-input",
+                                                "Repository",
+                                                &modal.repository_path,
+                                                modal.repository_path_cursor,
+                                                "Path to git repository",
+                                                repository_active,
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.update_create_worktree_modal_input(
+                                                    ModalInputEvent::SetActiveField(
+                                                        CreateWorktreeField::RepositoryPath,
+                                                    ),
+                                                    cx,
+                                                );
+                                            })),
+                                        )
+                                        .child(
+                                            modal_input_field(
+                                                theme,
+                                                "create-worktree-name-input",
+                                                "Worktree Name",
+                                                &modal.worktree_name,
+                                                modal.worktree_name_cursor,
+                                                "e.g. remote-ssh",
+                                                worktree_active,
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.update_create_worktree_modal_input(
+                                                    ModalInputEvent::SetActiveField(
+                                                        CreateWorktreeField::WorktreeName,
+                                                    ),
+                                                    cx,
+                                                );
+                                            })),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .rounded_sm()
+                                                .border_1()
+                                                .border_color(rgb(theme.border))
+                                                .bg(rgb(theme.panel_bg))
+                                                .p_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .child("Branch"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_family(FONT_MONO)
+                                                        .text_color(rgb(theme.text_primary))
+                                                        .child(branch_name),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .rounded_sm()
+                                                .border_1()
+                                                .border_color(rgb(theme.border))
+                                                .bg(rgb(theme.panel_bg))
+                                                .p_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .child("Path"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_family(FONT_MONO)
+                                                        .text_color(rgb(theme.text_primary))
+                                                        .child(target_path_preview),
+                                                ),
+                                        )
+                                        .when_some(modal.managed_preview_error.clone(), |this, error| {
+                                            this.child(
+                                                div()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(rgb(0xa44949))
+                                                    .bg(rgb(0x4d2a2a))
+                                                    .px_2()
+                                                    .py_1()
+                                                    .text_xs()
+                                                    .text_color(rgb(0xffd7d7))
+                                                    .child(error),
+                                            )
+                                        })
+                                    })
+                                    // Review PR tab content
+                                    .when(is_review_pr_tab, |this| {
+                                        this.child(
+                                            div()
+                                                .flex_none()
+                                                .text_xs()
+                                                .text_color(rgb(theme.text_muted))
+                                                .child("Paste a GitHub PR number, `#123`, or full pull-request URL."),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .id("create-review-pr-discrete-clone-checkbox")
+                                                .cursor_pointer()
+                                                .rounded_sm()
+                                                .border_1()
+                                                .border_color(rgb(if is_discrete_clone {
+                                                    theme.accent
+                                                } else {
+                                                    theme.border
+                                                }))
+                                                .bg(rgb(theme.panel_bg))
+                                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                                .px_2()
+                                                .py_2()
+                                                .flex()
+                                                .items_start()
+                                                .gap_2()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    let next_kind = if is_discrete_clone {
+                                                        CheckoutKind::LinkedWorktree
+                                                    } else {
+                                                        CheckoutKind::DiscreteClone
+                                                    };
+                                                    this.set_create_modal_checkout_kind(next_kind, cx);
+                                                }))
+                                                .child(
+                                                    div()
+                                                        .mt(px(1.))
+                                                        .w(px(14.))
+                                                        .h(px(14.))
+                                                        .rounded_sm()
+                                                        .border_1()
+                                                        .border_color(rgb(if is_discrete_clone {
+                                                            theme.accent
+                                                        } else {
+                                                            theme.border
+                                                        }))
+                                                        .bg(rgb(if is_discrete_clone {
+                                                            theme.accent
+                                                        } else {
+                                                            theme.panel_bg
+                                                        }))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .child(
+                                                            div()
+                                                                .font_family(FONT_MONO)
+                                                                .text_size(px(9.))
+                                                                .text_color(rgb(if is_discrete_clone {
+                                                                    theme.sidebar_bg
+                                                                } else {
+                                                                    theme.panel_bg
+                                                                }))
+                                                                .child(if is_discrete_clone {
+                                                                    "\u{f00c}"
+                                                                } else {
+                                                                    ""
+                                                                }),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap(px(2.))
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .text_color(rgb(theme.text_primary))
+                                                                .child("Discrete clone"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(theme.text_muted))
+                                                                .child(checkout_kind.description()),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            modal_input_field(
+                                                theme,
+                                                "review-pr-repo-input",
+                                                "Repository",
+                                                &modal.repository_path,
+                                                modal.repository_path_cursor,
+                                                "Path to git repository",
+                                                review_repository_active,
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.update_create_review_pr_modal_input(
+                                                    ReviewPrModalInputEvent::SetActiveField(
+                                                        CreateReviewPrField::RepositoryPath,
+                                                    ),
+                                                    cx,
+                                                );
+                                            })),
+                                        )
+                                        .child(
+                                            modal_input_field(
+                                                theme,
+                                                "review-pr-reference-input",
+                                                "Pull Request",
+                                                &modal.pr_reference,
+                                                modal.pr_reference_cursor,
+                                                "e.g. 42, #42, or https://github.com/org/repo/pull/42",
+                                                review_pr_active,
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.update_create_review_pr_modal_input(
+                                                    ReviewPrModalInputEvent::SetActiveField(
+                                                        CreateReviewPrField::PullRequestReference,
+                                                    ),
+                                                    cx,
+                                                );
+                                            })),
+                                        )
+                                        .child(
+                                            modal_input_field(
+                                                theme,
+                                                "review-pr-name-input",
+                                                "Worktree Name",
+                                                &modal.worktree_name,
+                                                modal.worktree_name_cursor,
+                                                "Optional. Defaults from the pull request title.",
+                                                review_name_active,
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.update_create_review_pr_modal_input(
+                                                    ReviewPrModalInputEvent::SetActiveField(
+                                                        CreateReviewPrField::WorktreeName,
+                                                    ),
+                                                    cx,
+                                                );
+                                            })),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .rounded_sm()
+                                                .border_1()
+                                                .border_color(rgb(theme.border))
+                                                .bg(rgb(theme.panel_bg))
+                                                .p_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .child("Branch"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_family(FONT_MONO)
+                                                        .text_color(rgb(theme.text_primary))
+                                                        .child(review_branch_preview),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .rounded_sm()
+                                                .border_1()
+                                                .border_color(rgb(theme.border))
+                                                .bg(rgb(theme.panel_bg))
+                                                .p_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .child("Path"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_family(FONT_MONO)
+                                                        .text_color(rgb(theme.text_primary))
+                                                        .child(review_path_preview),
+                                                ),
+                                        )
+                                    })
+                                    // Remote Outpost tab content
+                                    .when(is_outpost_tab, |this| {
+                                        this.child(
+                                            div()
+                                                .flex_none()
+                                                .id("outpost-host-selector")
+                                                .cursor_pointer()
+                                                .rounded_sm()
+                                                .border_1()
+                                                .border_color(rgb(if host_active {
+                                                    theme.accent
+                                                } else {
+                                                    theme.border
+                                                }))
+                                                .bg(rgb(theme.panel_bg))
+                                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                                .p_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .child("Host"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .child(
+                                                            div()
+                                                                .text_sm()
+                                                                .font_family(FONT_MONO)
+                                                                .text_color(rgb(theme.text_primary))
+                                                                .child(host_name),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(theme.text_muted))
+                                                                .child(if host_dropdown_open {
+                                                                    "\u{25b2}"
+                                                                } else {
+                                                                    "\u{25bc}"
+                                                                }),
+                                                        ),
+                                                )
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.update_create_outpost_modal_input(
+                                                        OutpostModalInputEvent::ToggleHostDropdown,
+                                                        cx,
+                                                    );
+                                                })),
+                                        )
+                                        .when(host_dropdown_open, |this| {
+                                            this.child(
+                                                div()
+                                                    .id("outpost-host-dropdown")
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(rgb(theme.accent))
+                                                    .bg(rgb(theme.panel_bg))
+                                                    .py_1()
+                                                    .max_h(px(200.))
+                                                    .overflow_y_scroll()
+                                                    .children(host_names.into_iter().map(
+                                                        |(index, name)| {
+                                                            let is_selected = index == selected_host_index;
+                                                            div()
+                                                                .id(("host-option", index))
+                                                                .cursor_pointer()
+                                                                .px_2()
+                                                                .py_1()
+                                                                .text_sm()
+                                                                .font_family(FONT_MONO)
+                                                                .rounded_sm()
+                                                                .mx_1()
+                                                                .text_color(rgb(theme.text_primary))
+                                                                .when(is_selected, |this| {
+                                                                    this.bg(rgb(theme.panel_active_bg))
+                                                                })
+                                                                .hover(|this| {
+                                                                    this.bg(rgb(theme.panel_active_bg))
+                                                                })
+                                                                .child(name)
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.update_create_outpost_modal_input(
+                                                                            OutpostModalInputEvent::SelectHost(
+                                                                                index,
+                                                                            ),
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                ))
+                                                        },
+                                                    )),
+                                            )
+                                        })
+                                        .child(
+                                            modal_input_field(
+                                                theme,
+                                                "outpost-clone-url-input",
+                                                "Clone URL",
+                                                &modal.clone_url,
+                                                modal.clone_url_cursor,
+                                                "git@github.com:user/repo.git",
+                                                clone_url_active,
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.update_create_outpost_modal_input(
+                                                    OutpostModalInputEvent::SetActiveField(
+                                                        CreateOutpostField::CloneUrl,
+                                                    ),
+                                                    cx,
+                                                );
+                                            })),
+                                        )
+                                        .child(
+                                            modal_input_field(
+                                                theme,
+                                                "outpost-name-input",
+                                                "Outpost Name",
+                                                &modal.outpost_name,
+                                                modal.outpost_name_cursor,
+                                                "e.g. my-feature",
+                                                outpost_name_active,
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.update_create_outpost_modal_input(
+                                                    OutpostModalInputEvent::SetActiveField(
+                                                        CreateOutpostField::OutpostName,
+                                                    ),
+                                                    cx,
+                                                );
+                                            })),
+                                        )
+                                        .child(
+                                            div()
+                                                .rounded_sm()
+                                                .border_1()
+                                                .border_color(rgb(theme.border))
+                                                .bg(rgb(theme.panel_bg))
+                                                .p_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .child("Branch"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_family(FONT_MONO)
+                                                        .text_color(rgb(theme.text_primary))
+                                                        .child(outpost_branch_preview),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .rounded_sm()
+                                                .border_1()
+                                                .border_color(rgb(theme.border))
+                                                .bg(rgb(theme.panel_bg))
+                                                .p_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .child("Remote Path"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_family(FONT_MONO)
+                                                        .text_color(rgb(theme.text_primary))
+                                                        .child(remote_preview),
+                                                ),
                                         )
                                     }),
-                            )
-                        })
-                        .when(!daemon_managed_worktree, |this| this.child(
-                            div()
-                                .flex_none()
-                                .id("create-discrete-clone-checkbox")
-                                .cursor_pointer()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(if is_discrete_clone {
-                                    theme.accent
-                                } else {
-                                    theme.border
-                                }))
-                                .bg(rgb(theme.panel_bg))
-                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
-                                .px_2()
-                                .py_2()
-                                .flex()
-                                .items_start()
-                                .gap_2()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let next_kind = if is_discrete_clone {
-                                        CheckoutKind::LinkedWorktree
-                                    } else {
-                                        CheckoutKind::DiscreteClone
-                                    };
-                                    this.set_create_modal_checkout_kind(next_kind, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .mt(px(1.))
-                                        .w(px(14.))
-                                        .h(px(14.))
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(rgb(if is_discrete_clone {
-                                            theme.accent
-                                        } else {
-                                            theme.border
-                                        }))
-                                        .bg(rgb(if is_discrete_clone {
-                                            theme.accent
-                                        } else {
-                                            theme.panel_bg
-                                        }))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(
-                                            div()
-                                                .font_family(FONT_MONO)
-                                                .text_size(px(9.))
-                                                .text_color(rgb(if is_discrete_clone {
-                                                    theme.sidebar_bg
-                                                } else {
-                                                    theme.panel_bg
-                                                }))
-                                                .child(if is_discrete_clone {
-                                                    "\u{f00c}"
-                                                } else {
-                                                    ""
-                                                }),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(theme.text_primary))
-                                                .child("Discrete clone"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(theme.text_muted))
-                                                .child(checkout_kind.description()),
-                                        ),
-                                ),
-                        ))
-                        .child(
-                            modal_input_field(
-                                theme,
-                                "create-worktree-repo-input",
-                                "Repository",
-                                &modal.repository_path,
-                                modal.repository_path_cursor,
-                                "Path to git repository",
-                                repository_active,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_create_worktree_modal_input(
-                                    ModalInputEvent::SetActiveField(
-                                        CreateWorktreeField::RepositoryPath,
-                                    ),
-                                    cx,
-                                );
-                            })),
-                        )
-                        .child(
-                            modal_input_field(
-                                theme,
-                                "create-worktree-name-input",
-                                "Worktree Name",
-                                &modal.worktree_name,
-                                modal.worktree_name_cursor,
-                                "e.g. remote-ssh",
-                                worktree_active,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_create_worktree_modal_input(
-                                    ModalInputEvent::SetActiveField(
-                                        CreateWorktreeField::WorktreeName,
-                                    ),
-                                    cx,
-                                );
-                            })),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(theme.border))
-                                .bg(rgb(theme.panel_bg))
-                                .p_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("Branch"),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_family(FONT_MONO)
-                                        .text_color(rgb(theme.text_primary))
-                                        .child(branch_name),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(theme.border))
-                                .bg(rgb(theme.panel_bg))
-                                .p_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("Path"),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_family(FONT_MONO)
-                                        .text_color(rgb(theme.text_primary))
-                                        .child(target_path_preview),
-                                ),
-                        )
-                        .when_some(modal.managed_preview_error.clone(), |this, error| {
-                            this.child(
-                                div()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(rgb(0xa44949))
-                                    .bg(rgb(0x4d2a2a))
-                                    .px_2()
-                                    .py_1()
-                                    .text_xs()
-                                    .text_color(rgb(0xffd7d7))
-                                    .child(error),
-                            )
-                        })
-                    })
-                    // Review PR tab content
-                    .when(is_review_pr_tab, |this| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(rgb(theme.text_muted))
-                                .child("Paste a GitHub PR number, `#123`, or full pull-request URL."),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .id("create-review-pr-discrete-clone-checkbox")
-                                .cursor_pointer()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(if is_discrete_clone {
-                                    theme.accent
-                                } else {
-                                    theme.border
-                                }))
-                                .bg(rgb(theme.panel_bg))
-                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
-                                .px_2()
-                                .py_2()
-                                .flex()
-                                .items_start()
-                                .gap_2()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let next_kind = if is_discrete_clone {
-                                        CheckoutKind::LinkedWorktree
-                                    } else {
-                                        CheckoutKind::DiscreteClone
-                                    };
-                                    this.set_create_modal_checkout_kind(next_kind, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .mt(px(1.))
-                                        .w(px(14.))
-                                        .h(px(14.))
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(rgb(if is_discrete_clone {
-                                            theme.accent
-                                        } else {
-                                            theme.border
-                                        }))
-                                        .bg(rgb(if is_discrete_clone {
-                                            theme.accent
-                                        } else {
-                                            theme.panel_bg
-                                        }))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(
-                                            div()
-                                                .font_family(FONT_MONO)
-                                                .text_size(px(9.))
-                                                .text_color(rgb(if is_discrete_clone {
-                                                    theme.sidebar_bg
-                                                } else {
-                                                    theme.panel_bg
-                                                }))
-                                                .child(if is_discrete_clone {
-                                                    "\u{f00c}"
-                                                } else {
-                                                    ""
-                                                }),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(theme.text_primary))
-                                                .child("Discrete clone"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(theme.text_muted))
-                                                .child(checkout_kind.description()),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            modal_input_field(
-                                theme,
-                                "review-pr-repo-input",
-                                "Repository",
-                                &modal.repository_path,
-                                modal.repository_path_cursor,
-                                "Path to git repository",
-                                review_repository_active,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_create_review_pr_modal_input(
-                                    ReviewPrModalInputEvent::SetActiveField(
-                                        CreateReviewPrField::RepositoryPath,
-                                    ),
-                                    cx,
-                                );
-                            })),
-                        )
-                        .child(
-                            modal_input_field(
-                                theme,
-                                "review-pr-reference-input",
-                                "Pull Request",
-                                &modal.pr_reference,
-                                modal.pr_reference_cursor,
-                                "e.g. 42, #42, or https://github.com/org/repo/pull/42",
-                                review_pr_active,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_create_review_pr_modal_input(
-                                    ReviewPrModalInputEvent::SetActiveField(
-                                        CreateReviewPrField::PullRequestReference,
-                                    ),
-                                    cx,
-                                );
-                            })),
-                        )
-                        .child(
-                            modal_input_field(
-                                theme,
-                                "review-pr-name-input",
-                                "Worktree Name",
-                                &modal.worktree_name,
-                                modal.worktree_name_cursor,
-                                "Optional. Defaults from the pull request title.",
-                                review_name_active,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_create_review_pr_modal_input(
-                                    ReviewPrModalInputEvent::SetActiveField(
-                                        CreateReviewPrField::WorktreeName,
-                                    ),
-                                    cx,
-                                );
-                            })),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(theme.border))
-                                .bg(rgb(theme.panel_bg))
-                                .p_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("Branch"),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_family(FONT_MONO)
-                                        .text_color(rgb(theme.text_primary))
-                                        .child(review_branch_preview),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(theme.border))
-                                .bg(rgb(theme.panel_bg))
-                                .p_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("Path"),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_family(FONT_MONO)
-                                        .text_color(rgb(theme.text_primary))
-                                        .child(review_path_preview),
-                                ),
-                        )
-                    })
-                    // Remote Outpost tab content
-                    .when(is_outpost_tab, |this| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .id("outpost-host-selector")
-                                .cursor_pointer()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(if host_active {
-                                    theme.accent
-                                } else {
-                                    theme.border
-                                }))
-                                .bg(rgb(theme.panel_bg))
-                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
-                                .p_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("Host"),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_family(FONT_MONO)
-                                                .text_color(rgb(theme.text_primary))
-                                                .child(host_name),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(theme.text_muted))
-                                                .child(if host_dropdown_open {
-                                                    "\u{25b2}"
-                                                } else {
-                                                    "\u{25bc}"
-                                                }),
-                                        ),
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.update_create_outpost_modal_input(
-                                        OutpostModalInputEvent::ToggleHostDropdown,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .when(host_dropdown_open, |this| {
-                            this.child(
-                                div()
-                                    .id("outpost-host-dropdown")
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(rgb(theme.accent))
-                                    .bg(rgb(theme.panel_bg))
-                                    .py_1()
-                                    .max_h(px(200.))
-                                    .overflow_y_scroll()
-                                    .children(host_names.into_iter().map(
-                                        |(index, name)| {
-                                            let is_selected = index == selected_host_index;
-                                            div()
-                                                .id(("host-option", index))
-                                                .cursor_pointer()
-                                                .px_2()
-                                                .py_1()
-                                                .text_sm()
-                                                .font_family(FONT_MONO)
-                                                .rounded_sm()
-                                                .mx_1()
-                                                .text_color(rgb(theme.text_primary))
-                                                .when(is_selected, |this| {
-                                                    this.bg(rgb(theme.panel_active_bg))
-                                                })
-                                                .hover(|this| {
-                                                    this.bg(rgb(theme.panel_active_bg))
-                                                })
-                                                .child(name)
-                                                .on_click(cx.listener(
-                                                    move |this, _, _, cx| {
-                                                        this.update_create_outpost_modal_input(
-                                                            OutpostModalInputEvent::SelectHost(
-                                                                index,
-                                                            ),
-                                                            cx,
-                                                        );
-                                                    },
-                                                ))
-                                        },
-                                    )),
-                            )
-                        })
-                        .child(
-                            modal_input_field(
-                                theme,
-                                "outpost-clone-url-input",
-                                "Clone URL",
-                                &modal.clone_url,
-                                modal.clone_url_cursor,
-                                "git@github.com:user/repo.git",
-                                clone_url_active,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_create_outpost_modal_input(
-                                    OutpostModalInputEvent::SetActiveField(
-                                        CreateOutpostField::CloneUrl,
-                                    ),
-                                    cx,
-                                );
-                            })),
-                        )
-                        .child(
-                            modal_input_field(
-                                theme,
-                                "outpost-name-input",
-                                "Outpost Name",
-                                &modal.outpost_name,
-                                modal.outpost_name_cursor,
-                                "e.g. my-feature",
-                                outpost_name_active,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_create_outpost_modal_input(
-                                    OutpostModalInputEvent::SetActiveField(
-                                        CreateOutpostField::OutpostName,
-                                    ),
-                                    cx,
-                                );
-                            })),
-                        )
-                        .child(
-                            div()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(theme.border))
-                                .bg(rgb(theme.panel_bg))
-                                .p_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("Branch"),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_family(FONT_MONO)
-                                        .text_color(rgb(theme.text_primary))
-                                        .child(outpost_branch_preview),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(theme.border))
-                                .bg(rgb(theme.panel_bg))
-                                .p_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("Remote Path"),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_family(FONT_MONO)
-                                        .text_color(rgb(theme.text_primary))
-                                        .child(remote_preview),
-                                ),
-                        )
-                    })
+                            ),
+                    )
                     // Error
                     .when_some(modal.error.clone(), |this, error| {
                         this.child(
