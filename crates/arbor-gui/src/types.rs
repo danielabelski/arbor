@@ -161,8 +161,7 @@ impl SshTerminalShell {
                     Err(poisoned) => poisoned.into_inner(),
                 };
                 emulator.process(&data);
-                self.generation
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.generation.fetch_add(1, Ordering::Relaxed);
                 true
             },
             _ => false,
@@ -220,13 +219,12 @@ impl SshTerminalShell {
         if let Ok(mut emulator) = self.emulator.lock() {
             emulator.resize(rows, cols);
         }
-        self.generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
     fn generation(&self) -> u64 {
-        self.generation.load(std::sync::atomic::Ordering::Relaxed)
+        self.generation.load(Ordering::Relaxed)
     }
 
     fn close(&self) {
@@ -389,36 +387,31 @@ impl DaemonTerminalWsState {
     }
 
     fn note_event(&self) {
-        self.event_generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.event_generation.fetch_add(1, Ordering::Relaxed);
         if let Some(ref tx) = self.poll_notify {
             let _ = tx.send(());
         }
     }
 
     fn event_generation(&self) -> u64 {
-        self.event_generation
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.event_generation.load(Ordering::Relaxed)
     }
 
     fn close(&self) {
-        self.closed
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.closed.store(true, Ordering::Relaxed);
     }
 
     fn note_connection_refused(&self) {
-        self.connection_refused
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.connection_refused.store(true, Ordering::Relaxed);
         self.note_event();
     }
 
     fn take_connection_refused(&self) -> bool {
-        self.connection_refused
-            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        self.connection_refused.swap(false, Ordering::Relaxed)
     }
 
     fn is_closed(&self) -> bool {
-        self.closed.load(std::sync::atomic::Ordering::Relaxed)
+        self.closed.load(Ordering::Relaxed)
     }
 
     /// Try to send keystroke bytes through the WebSocket channel.
@@ -752,7 +745,7 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
         let current_generation = self.ws_state.event_generation();
         let last_synced_generation = self
             .last_synced_ws_generation
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .load(Ordering::Relaxed);
         if current_generation > last_synced_generation {
             return is_active
                 || runtime_sync_interval_elapsed(
@@ -844,7 +837,7 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
         };
 
         self.last_synced_ws_generation
-            .store(observed_ws_generation, std::sync::atomic::Ordering::Relaxed);
+            .store(observed_ws_generation, Ordering::Relaxed);
 
         if apply_terminal_emulator_snapshot(session, snapshot.terminal.clone()) {
             outcome.changed = true;
@@ -1710,6 +1703,7 @@ struct ArborWindow {
     worktrees: Vec<WorktreeSummary>,
     worktree_stats_loading: bool,
     worktree_prs_loading: bool,
+    expanded_pr_checks_worktree: Option<PathBuf>,
     active_worktree_index: Option<usize>,
     worktree_selection_epoch: usize,
     changed_files: Vec<ChangedFile>,

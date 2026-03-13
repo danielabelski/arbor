@@ -415,8 +415,8 @@ fn request_async_daemon_snapshot(
         .compare_exchange(
             false,
             true,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
+            Ordering::AcqRel,
+            Ordering::Acquire,
         )
         .is_err()
     {
@@ -453,7 +453,7 @@ fn request_async_daemon_snapshot(
             },
         }
 
-        in_flight.store(false, std::sync::atomic::Ordering::Release);
+        in_flight.store(false, Ordering::Release);
     });
 }
 

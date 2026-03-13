@@ -153,16 +153,18 @@ impl ArborWindow {
             .terminals
             .iter()
             .any(|session| session.worktree_path == worktree_path);
-        if !has_terminal {
-            return self.spawn_terminal_session_inner(false, cx);
-        }
+        let created_terminal = selected_worktree_terminal_was_created(has_terminal, || {
+            self.spawn_terminal_session_inner(false, cx)
+        });
 
-        if let Some(session_id) = self.active_terminal_id_for_worktree(&worktree_path) {
+        if !created_terminal
+            && let Some(session_id) = self.active_terminal_id_for_worktree(&worktree_path)
+        {
             self.active_terminal_by_worktree
                 .insert(worktree_path, session_id);
         }
 
-        true
+        created_terminal
     }
 
     fn close_terminal_session_by_id(&mut self, session_id: u64) -> bool {
@@ -1785,5 +1787,16 @@ fn collect_file_tree_entries(
         if is_dir && expanded_dirs.contains(&relative) {
             collect_file_tree_entries(base, &full_path, depth + 1, expanded_dirs, entries);
         }
+    }
+}
+
+fn selected_worktree_terminal_was_created<F>(has_terminal: bool, spawn_terminal: F) -> bool
+where
+    F: FnOnce() -> bool,
+{
+    if has_terminal {
+        false
+    } else {
+        spawn_terminal()
     }
 }

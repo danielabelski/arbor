@@ -49,7 +49,10 @@ use {
         net::TcpListener,
         path::{Path, PathBuf},
         process::{Child, Command, Stdio},
-        sync::{Arc, Mutex, OnceLock},
+        sync::{
+            Arc, Mutex, OnceLock,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::{Duration, Instant, SystemTime},
     },
     syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet},
@@ -75,6 +78,7 @@ include!("daemon_connection_ui.rs");
 include!("settings_ui.rs");
 include!("top_bar.rs");
 include!("sidebar.rs");
+include!("pr_summary_ui.rs");
 include!("changes_pane.rs");
 include!("log_view.rs");
 include!("center_panel.rs");
@@ -221,6 +225,7 @@ impl ArborWindow {
                     worktrees: Vec::new(),
                     worktree_stats_loading: false,
                     worktree_prs_loading: false,
+                    expanded_pr_checks_worktree: None,
                     active_worktree_index: None,
                     worktree_selection_epoch: 0,
                     changed_files: Vec::new(),
@@ -590,6 +595,7 @@ impl ArborWindow {
             worktrees: Vec::new(),
             worktree_stats_loading: false,
             worktree_prs_loading: false,
+            expanded_pr_checks_worktree: None,
             active_worktree_index: None,
             worktree_selection_epoch: 0,
             changed_files: Vec::new(),
@@ -846,12 +852,17 @@ impl ArborWindow {
                         return;
                     }
 
-                    this.refresh_worktree_diff_summaries(cx);
-                    this.refresh_worktree_ports(cx);
+                    let refresh = this.refresh_worktree_inventory(
+                        cx,
+                        WorktreeInventoryRefreshMode::PreserveTerminalState,
+                    );
                     if this.active_outpost_index.is_some() {
                         this.refresh_remote_changed_files(cx);
                     } else {
                         this.refresh_changed_files(cx);
+                    }
+                    if refresh.visible_change() {
+                        cx.notify();
                     }
                 });
                 if updated.is_err() {
@@ -1863,9 +1874,18 @@ impl ArborWindow {
         }
     }
 
-    fn refresh_worktrees(&mut self, cx: &mut Context<Self>) {
-        tracing::debug!("refreshing worktrees");
-        let previously_selected = self.selected_worktree_path().map(Path::to_path_buf);
+    fn refresh_worktree_inventory(
+        &mut self,
+        cx: &mut Context<Self>,
+        mode: WorktreeInventoryRefreshMode,
+    ) -> WorktreeInventoryRefreshResult {
+        let previous_local_selection = self.selected_local_worktree_path().map(Path::to_path_buf);
+        let active_repository_group_key = self
+            .active_repository_index
+            .and_then(|repository_index| self.repositories.get(repository_index))
+            .map(|repository| repository.group_key.clone());
+        let preserve_non_local_selection =
+            self.active_outpost_index.is_some() || self.active_remote_worktree.is_some();
         let repositories = self.repositories.clone();
         let previous_summaries: HashMap<PathBuf, changes::DiffLineSummary> = self
             .worktrees
@@ -2046,25 +2066,12 @@ impl ArborWindow {
                         .iter()
                         .any(|worktree| worktree.diff_summary.is_none());
 
-                    this.active_worktree_index = previously_selected
-                        .as_ref()
-                        .and_then(|path| {
-                            this.worktrees
-                                .iter()
-                                .position(|worktree| worktree.path == *path)
-                        })
-                        .or_else(|| {
-                            this.active_repository_index.and_then(|repository_index| {
-                                this.repositories
-                                    .get(repository_index)
-                                    .and_then(|repository| {
-                                        this.worktrees.iter().position(|worktree| {
-                                            worktree.group_key == repository.group_key
-                                        })
-                                    })
-                            })
-                        })
-                        .or_else(|| (!this.worktrees.is_empty()).then_some(0));
+                    this.active_worktree_index = next_active_worktree_index(
+                        previous_local_selection.as_deref(),
+                        active_repository_group_key.as_deref(),
+                        &this.worktrees,
+                        preserve_non_local_selection,
+                    );
 
                     this.active_terminal_by_worktree.retain(|path, _| {
                         this.worktrees
@@ -2106,9 +2113,14 @@ impl ArborWindow {
                     this.refresh_agent_tasks(cx);
                     this.refresh_agent_sessions(cx);
                     this.refresh_worktree_pull_requests(cx);
-                    this.refresh_changed_files(cx);
+                    if this.active_outpost_index.is_some() {
+                        this.refresh_remote_changed_files(cx);
+                    } else {
+                        this.refresh_changed_files(cx);
+                    }
                     this.sync_selected_worktree_notes(cx);
-                    let created_terminal = this.ensure_selected_worktree_terminal(cx);
+                    let created_terminal =
+                        mode.created_terminal(|| this.ensure_selected_worktree_terminal(cx));
                     if created_terminal {
                         this.sync_daemon_session_store(cx);
                     }
@@ -2117,6 +2129,17 @@ impl ArborWindow {
                     }
                 });
         }));
+
+        WorktreeInventoryRefreshResult::default()
+    }
+
+    fn refresh_worktrees(&mut self, cx: &mut Context<Self>) {
+        tracing::debug!("refreshing worktrees");
+        let refresh = self
+            .refresh_worktree_inventory(cx, WorktreeInventoryRefreshMode::EnsureSelectedTerminal);
+        if refresh.visible_change() {
+            cx.notify();
+        }
     }
 
     fn refresh_worktree_diff_summaries(&mut self, cx: &mut Context<Self>) {
@@ -2483,6 +2506,10 @@ impl ArborWindow {
                 )
             })
             .collect();
+        let tracked_paths: HashSet<PathBuf> = tracked_branches
+            .iter()
+            .map(|(path, ..)| path.clone())
+            .collect();
         let github_token = self.github_access_token();
         let github_service = self.github_service.clone();
 
@@ -2503,81 +2530,103 @@ impl ArborWindow {
         }
 
         self.worktree_prs_loading = true;
-        cx.spawn(async move |this, cx| {
-            let results = cx
-                .background_spawn(async move {
-                    tracked_branches
-                        .into_iter()
-                        .map(|(path, branch, repo_slug)| {
-                            // Try gh CLI first for rich details
-                            let details = repo_slug.as_ref().and_then(|slug| {
-                                github_service::pull_request_details(slug, &branch)
-                            });
+        let mut cleared_untracked = false;
+        for worktree in &mut self.worktrees {
+            if tracked_paths.contains(&worktree.path) {
+                continue;
+            }
+            if worktree.pr_number.take().is_some()
+                || worktree.pr_url.take().is_some()
+                || worktree.pr_details.take().is_some()
+            {
+                cleared_untracked = true;
+            }
+        }
+        if cleared_untracked {
+            cx.notify();
+        }
 
-                            let (pr_number, pr_url) = if let Some(ref d) = details {
-                                (Some(d.number), Some(d.url.clone()))
-                            } else {
-                                // Fall back to octocrab for just the number
-                                let num = repo_slug.as_ref().and_then(|_| {
-                                    github_pr_number_for_worktree(
-                                        github_service.as_ref(),
-                                        &path,
-                                        &branch,
-                                        github_token.as_deref(),
-                                    )
-                                });
-                                let url = num.and_then(|n| {
-                                    repo_slug.as_ref().map(|slug| github_pr_url(slug, n))
-                                });
-                                (num, url)
-                            };
+        let pending_results = Arc::new(AtomicUsize::new(tracked_branches.len()));
+        for (path, branch, repo_slug) in tracked_branches {
+            let github_service = github_service.clone();
+            let github_token = github_token.clone();
+            let pending_results = pending_results.clone();
 
-                            (path, pr_number, pr_url, details)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .await;
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move {
+                        Self::lookup_worktree_pull_request(
+                            github_service.as_ref(),
+                            github_token.as_deref(),
+                            path,
+                            branch,
+                            repo_slug,
+                        )
+                    })
+                    .await;
 
-            let _ = this.update(cx, |this, cx| {
-                this.worktree_prs_loading = false;
+                let is_last_result = pending_results.fetch_sub(1, Ordering::SeqCst) == 1;
 
-                type PrInfo = (
-                    Option<u64>,
-                    Option<String>,
-                    Option<github_service::PrDetails>,
-                );
-                let pr_by_path: HashMap<PathBuf, PrInfo> = results
-                    .into_iter()
-                    .map(|(path, num, url, details)| (path, (num, url, details)))
-                    .collect();
+                let _ = this.update(cx, |this, cx| {
+                    let (path, next_num, next_url, next_details) = result;
+                    let mut changed = false;
 
-                let mut changed = false;
-
-                for worktree in &mut this.worktrees {
-                    let (next_num, next_url, next_details) = pr_by_path
-                        .get(&worktree.path)
-                        .cloned()
-                        .unwrap_or((None, None, None));
-                    if worktree.pr_number != next_num || worktree.pr_url != next_url {
+                    if let Some(worktree) = this
+                        .worktrees
+                        .iter_mut()
+                        .find(|worktree| worktree.path == path)
+                        && (worktree.pr_number != next_num
+                            || worktree.pr_url != next_url
+                            || worktree.pr_details != next_details)
+                    {
                         worktree.pr_number = next_num;
                         worktree.pr_url = next_url;
+                        worktree.pr_details = next_details;
                         changed = true;
                     }
-                    // Always update pr_details (no PartialEq on PrDetails)
-                    let had_details = worktree.pr_details.is_some();
-                    let has_details = next_details.is_some();
-                    worktree.pr_details = next_details;
-                    if had_details != has_details {
-                        changed = true;
-                    }
-                }
 
-                if changed {
-                    cx.notify();
-                }
+                    if is_last_result {
+                        this.worktree_prs_loading = false;
+                        changed = true;
+                    }
+
+                    if changed {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn lookup_worktree_pull_request(
+        github_service: &dyn github_service::GitHubService,
+        github_token: Option<&str>,
+        path: PathBuf,
+        branch: String,
+        repo_slug: Option<String>,
+    ) -> (
+        PathBuf,
+        Option<u64>,
+        Option<String>,
+        Option<github_service::PrDetails>,
+    ) {
+        let details = repo_slug
+            .as_ref()
+            .and_then(|slug| github_service::pull_request_details(slug, &branch));
+
+        let (pr_number, pr_url) = if let Some(ref details) = details {
+            (Some(details.number), Some(details.url.clone()))
+        } else {
+            let pr_number = repo_slug.as_ref().and_then(|_| {
+                github_pr_number_for_worktree(github_service, &path, &branch, github_token)
             });
-        })
-        .detach();
+            let pr_url = pr_number
+                .and_then(|number| repo_slug.as_ref().map(|slug| github_pr_url(slug, number)));
+            (pr_number, pr_url)
+        };
+
+        (path, pr_number, pr_url, details)
     }
 
     fn switch_terminal_backend(
@@ -4397,6 +4446,36 @@ impl RepositorySummary {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct WorktreeInventoryRefreshResult {
+    rows_changed: bool,
+    created_terminal: bool,
+}
+
+impl WorktreeInventoryRefreshResult {
+    fn visible_change(self) -> bool {
+        self.rows_changed || self.created_terminal
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeInventoryRefreshMode {
+    PreserveTerminalState,
+    EnsureSelectedTerminal,
+}
+
+impl WorktreeInventoryRefreshMode {
+    fn created_terminal<F>(self, ensure_selected_terminal: F) -> bool
+    where
+        F: FnOnce() -> bool,
+    {
+        match self {
+            Self::PreserveTerminalState => false,
+            Self::EnsureSelectedTerminal => ensure_selected_terminal(),
+        }
+    }
+}
+
 impl EntityInputHandler for ArborWindow {
     fn text_for_range(
         &mut self,
@@ -5378,6 +5457,28 @@ fn worktree_rows_changed(previous: &[WorktreeSummary], next: &[WorktreeSummary])
             || left.branch_divergence != right.branch_divergence
             || left.detected_ports != right.detected_ports
     })
+}
+
+fn next_active_worktree_index(
+    previous_local_selection: Option<&Path>,
+    active_repository_group_key: Option<&str>,
+    worktrees: &[WorktreeSummary],
+    preserve_non_local_selection: bool,
+) -> Option<usize> {
+    if preserve_non_local_selection {
+        return None;
+    }
+
+    previous_local_selection
+        .and_then(|path| worktrees.iter().position(|worktree| worktree.path == path))
+        .or_else(|| {
+            active_repository_group_key.and_then(|group_key| {
+                worktrees
+                    .iter()
+                    .position(|worktree| worktree.group_key == group_key)
+            })
+        })
+        .or_else(|| (!worktrees.is_empty()).then_some(0))
 }
 
 fn estimated_worktree_hover_popover_card_height(
@@ -7874,7 +7975,8 @@ mod tests {
             auto_commit_subject, build_side_by_side_diff_lines,
             checkout::CheckoutKind,
             estimated_worktree_hover_popover_card_height, extract_first_url,
-            resolve_github_access_token_from_sources, styled_lines_for_session,
+            prioritized_pr_checks_for_display, resolve_github_access_token_from_sources,
+            styled_lines_for_session,
             terminal_backend::{
                 TerminalCursor, TerminalModes, TerminalStyledCell, TerminalStyledLine,
                 TerminalStyledRun,
@@ -7892,6 +7994,7 @@ mod tests {
         },
         gpui::{Keystroke, point, px},
         std::{
+            cell::Cell,
             collections::HashMap,
             env, fs,
             path::{Path, PathBuf},
@@ -8076,6 +8179,100 @@ mod tests {
 
         let attention = crate::worktree_attention_indicator(&worktree);
         assert_eq!(attention.label, "Stuck");
+    }
+
+    #[test]
+    fn worktree_rows_changed_detects_external_worktree_addition() {
+        let previous = sample_worktree_summary();
+        let current = sample_worktree_summary();
+        let mut external = sample_worktree_summary();
+        external.path = "/tmp/repo/wt-external".into();
+        external.label = "wt-external".to_owned();
+        external.branch = "feature/external".to_owned();
+
+        assert!(crate::worktree_rows_changed(&[previous], &[
+            current, external
+        ]));
+    }
+
+    #[test]
+    fn selected_worktree_terminal_existing_session_is_not_reported_as_created() {
+        let spawn_called = Cell::new(false);
+
+        let created = crate::selected_worktree_terminal_was_created(true, || {
+            spawn_called.set(true);
+            true
+        });
+
+        assert!(!created);
+        assert!(!spawn_called.get());
+    }
+
+    #[test]
+    fn selected_worktree_terminal_reports_spawn_result_when_missing() {
+        assert!(crate::selected_worktree_terminal_was_created(false, || {
+            true
+        }));
+        assert!(!crate::selected_worktree_terminal_was_created(
+            false,
+            || false
+        ));
+    }
+
+    #[test]
+    fn background_inventory_refresh_does_not_recreate_selected_terminal() {
+        let ensure_called = Cell::new(false);
+
+        let created =
+            crate::WorktreeInventoryRefreshMode::PreserveTerminalState.created_terminal(|| {
+                ensure_called.set(true);
+                true
+            });
+
+        assert!(!created);
+        assert!(!ensure_called.get());
+    }
+
+    #[test]
+    fn explicit_inventory_refresh_reports_selected_terminal_creation() {
+        assert!(
+            crate::WorktreeInventoryRefreshMode::EnsureSelectedTerminal.created_terminal(|| true)
+        );
+        assert!(
+            !crate::WorktreeInventoryRefreshMode::EnsureSelectedTerminal.created_terminal(|| false)
+        );
+    }
+
+    #[test]
+    fn next_active_worktree_index_preserves_non_local_selection() {
+        let worktree = sample_worktree_summary();
+        let group_key = worktree.group_key.clone();
+
+        assert_eq!(
+            crate::next_active_worktree_index(None, Some(group_key.as_str()), &[worktree], true),
+            None
+        );
+    }
+
+    #[test]
+    fn next_active_worktree_index_restores_previous_local_selection() {
+        let first = sample_worktree_summary();
+        let mut second = sample_worktree_summary();
+        second.path = "/tmp/repo/wt-two".into();
+        second.label = "wt-two".to_owned();
+        second.branch = "feature/two".to_owned();
+        let second_path = second.path.clone();
+        let first_group_key = first.group_key.clone();
+
+        assert_eq!(
+            crate::next_active_worktree_index(
+                Some(second_path.as_path()),
+                Some(first_group_key.as_str()),
+                &[first, second],
+                false,
+            ),
+            Some(1)
+        );
     }
 
     #[test]
@@ -8275,6 +8472,9 @@ mod tests {
             additions: 12,
             deletions: 4,
             review_decision: crate::github_service::ReviewDecision::Pending,
+            mergeable: crate::github_service::MergeableState::Mergeable,
+            merge_state_status: crate::github_service::MergeStateStatus::Clean,
+            passed_checks: 1,
             checks_status: crate::github_service::CheckStatus::Pending,
             checks: vec![
                 ("ci".to_owned(), crate::github_service::CheckStatus::Pending),
@@ -8308,6 +8508,62 @@ mod tests {
 
         assert!(expanded > collapsed);
         assert!(expanded_bounds.size.height > collapsed_bounds.size.height);
+    }
+
+    #[test]
+    fn prioritized_pr_checks_show_failures_before_pending_before_successes() {
+        let pr = crate::github_service::PrDetails {
+            number: 7,
+            title: "Sort checks".to_owned(),
+            url: "https://example.com/pr/7".to_owned(),
+            state: crate::github_service::PrState::Open,
+            additions: 1,
+            deletions: 1,
+            review_decision: crate::github_service::ReviewDecision::Pending,
+            mergeable: crate::github_service::MergeableState::Mergeable,
+            merge_state_status: crate::github_service::MergeStateStatus::Clean,
+            passed_checks: 2,
+            checks_status: crate::github_service::CheckStatus::Pending,
+            checks: vec![
+                (
+                    "b-failure".to_owned(),
+                    crate::github_service::CheckStatus::Failure,
+                ),
+                (
+                    "a-pending".to_owned(),
+                    crate::github_service::CheckStatus::Pending,
+                ),
+                (
+                    "a-success".to_owned(),
+                    crate::github_service::CheckStatus::Success,
+                ),
+                (
+                    "z-success".to_owned(),
+                    crate::github_service::CheckStatus::Success,
+                ),
+            ],
+        };
+
+        let checks = prioritized_pr_checks_for_display(&pr);
+
+        assert_eq!(checks, &[
+            (
+                "b-failure".to_owned(),
+                crate::github_service::CheckStatus::Failure
+            ),
+            (
+                "a-pending".to_owned(),
+                crate::github_service::CheckStatus::Pending
+            ),
+            (
+                "a-success".to_owned(),
+                crate::github_service::CheckStatus::Success
+            ),
+            (
+                "z-success".to_owned(),
+                crate::github_service::CheckStatus::Success
+            ),
+        ]);
     }
 
     #[test]
