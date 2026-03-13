@@ -141,23 +141,51 @@ impl ArborWindow {
     fn sync_ui_state_store(&mut self, window: &Window, cx: &mut Context<Self>) {
         let next_state = self.ui_state_snapshot(window);
         if self.last_persisted_ui_state == next_state {
+            self.pending_ui_state_save = None;
             return;
         }
 
-        self.last_persisted_ui_state = next_state.clone();
-        self.last_ui_state_error = None;
+        if self.pending_ui_state_save.as_ref() == Some(&next_state) {
+            return;
+        }
 
+        self.pending_ui_state_save = Some(next_state);
+        self.start_pending_ui_state_save(cx);
+    }
+
+    fn start_pending_ui_state_save(&mut self, cx: &mut Context<Self>) {
+        if self.ui_state_save_in_flight {
+            return;
+        }
+
+        let Some(next_state) = self.pending_ui_state_save.take() else {
+            return;
+        };
+
+        self.ui_state_save_in_flight = true;
         let store = self.ui_state_store.clone();
+        let state_to_save = next_state.clone();
         self._ui_state_save_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { store.save(&next_state) }).await;
+            let result = cx
+                .background_spawn(async move { store.save(&state_to_save) })
+                .await;
             let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result
-                    && this.last_ui_state_error.as_deref() != Some(error.as_str())
-                {
-                    this.notice = Some(format!("failed to persist UI state: {error}"));
-                    this.last_ui_state_error = Some(error);
-                    cx.notify();
+                this.ui_state_save_in_flight = false;
+                match result {
+                    Ok(()) => {
+                        this.last_persisted_ui_state = next_state.clone();
+                        this.last_ui_state_error = None;
+                    },
+                    Err(error) => {
+                        if this.last_ui_state_error.as_deref() != Some(error.as_str()) {
+                            this.notice = Some(format!("failed to persist UI state: {error}"));
+                            this.last_ui_state_error = Some(error);
+                            cx.notify();
+                        }
+                    },
                 }
+
+                this.start_pending_ui_state_save(cx);
             });
         }));
     }

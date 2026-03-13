@@ -425,6 +425,8 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) {
         tracing::info!(url = %url, "connecting to daemon");
+        let connect_epoch = self.daemon_connect_epoch.wrapping_add(1);
+        self.daemon_connect_epoch = connect_epoch;
         self.daemon_base_url = url.to_owned();
         let token_key = auth_key.unwrap_or_else(|| url.to_owned());
         let client = match terminal_daemon_http::default_terminal_daemon_client(url) {
@@ -444,18 +446,22 @@ impl ArborWindow {
         }
 
         let url = url.to_owned();
-            cx.spawn(async move |this, cx| {
-                let result = cx
-                    .background_spawn(async move {
-                        let client_for_error = client.clone();
-                        client
-                            .list_sessions()
-                            .map(|records| (client, records))
-                            .map_err(|error| (client_for_error, error.to_string()))
-                    })
-                    .await;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let client_for_error = client.clone();
+                    client
+                        .list_sessions()
+                        .map(|records| (client, records))
+                        .map_err(|error| (client_for_error, error.to_string()))
+                })
+                .await;
 
             let _ = this.update(cx, |this, cx| {
+                if this.daemon_connect_epoch != connect_epoch {
+                    return;
+                }
+
                 match result {
                     Ok((client, records)) => {
                         this.terminal_daemon = Some(client);
