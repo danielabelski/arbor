@@ -108,6 +108,20 @@ pub struct IssueSourceDto {
     pub url: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueReviewKind {
+    PullRequest,
+    MergeRequest,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IssueReviewDto {
+    pub kind: IssueReviewKind,
+    pub label: String,
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct IssueDto {
     pub id: String,
@@ -117,6 +131,8 @@ pub struct IssueDto {
     pub url: Option<String>,
     pub suggested_worktree_name: String,
     pub updated_at: Option<String>,
+    pub linked_branch: Option<String>,
+    pub linked_review: Option<IssueReviewDto>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

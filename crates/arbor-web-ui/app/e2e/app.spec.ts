@@ -25,6 +25,8 @@ function parseManagedWorktreeRequest(raw: unknown): ManagedWorktreeRequest {
 test.describe("Arbor Web UI", () => {
   test.beforeEach(async ({ page }) => {
     let managedWorktreeCreateCount = 0;
+    let managedWorktreeName: string | null = null;
+    let managedWorktreeRepoRoot: string | null = null;
 
     await page.route("**/api/v1/repositories", (route) =>
       route.fulfill({
@@ -74,11 +76,13 @@ test.describe("Arbor Web UI", () => {
             pr_number: 365,
             pr_url: "https://github.com/penso/arbor/pull/365",
           },
-          ...(managedWorktreeCreateCount > 0
+          ...(managedWorktreeCreateCount > 0 &&
+            managedWorktreeName !== null &&
+            managedWorktreeRepoRoot !== null
             ? [{
-                repo_root: "/home/user/projects/arbor",
-                path: "/Users/penso/.arbor/worktrees/arbor/github-512-ship-httpd-issues",
-                branch: "codex/github-512-ship-httpd-issues",
+                repo_root: managedWorktreeRepoRoot,
+                path: `/Users/penso/.arbor/worktrees/arbor/${managedWorktreeName}`,
+                branch: `codex/${managedWorktreeName}`,
                 is_primary_checkout: false,
                 last_activity_unix_ms: Date.now(),
                 diff_additions: 0,
@@ -176,22 +180,30 @@ test.describe("Arbor Web UI", () => {
           },
           issues: [
             {
-              id: "github:512",
+              id: "512",
               display_id: "#512",
               title: "Ship daemon-backed issue worktrees",
               state: "open",
               url: "https://github.com/penso/arbor/issues/512",
               suggested_worktree_name: "github-512-ship-httpd-issues",
               updated_at: "2026-03-13T10:00:00Z",
+              linked_branch: "codex/github-512-ship-httpd-issues",
+              linked_review: {
+                kind: "pull_request",
+                label: "PR #365",
+                url: "https://github.com/penso/arbor/pull/365",
+              },
             },
             {
-              id: "github:513",
+              id: "513",
               display_id: "#513",
               title: "Teach the command palette about issues",
               state: "open",
               url: "https://github.com/penso/arbor/issues/513",
               suggested_worktree_name: "github-513-command-palette-issues",
               updated_at: "2026-03-13T08:30:00Z",
+              linked_branch: null,
+              linked_review: null,
             },
           ],
           notice: null,
@@ -215,6 +227,8 @@ test.describe("Arbor Web UI", () => {
     await page.route("**/api/v1/worktrees/managed", (route) => {
       managedWorktreeCreateCount += 1;
       const body = parseManagedWorktreeRequest(route.request().postDataJSON());
+      managedWorktreeName = body.worktree_name;
+      managedWorktreeRepoRoot = body.repo_root;
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -321,7 +335,7 @@ test.describe("Arbor Web UI", () => {
     await expect(statusBar.getByText(/2 terminals/)).toBeVisible();
   });
 
-  test("command palette opens issues tab from keyboard", async ({ page }) => {
+  test("command palette browses issues and opens the create modal", async ({ page }) => {
     const changesPanel = page.getByTestId("changes-panel");
     await expect(changesPanel.getByText("src/main.rs")).toBeVisible();
 
@@ -339,10 +353,26 @@ test.describe("Arbor Web UI", () => {
     await paletteInput.fill("issues");
     await paletteInput.press("Enter");
 
-    await expect(changesPanel.getByText("Ship daemon-backed issue worktrees")).toBeVisible();
-    await expect(changesPanel.getByText("GitHub")).toBeVisible();
-    await expect(changesPanel.locator(".issue-item")).toHaveCount(2);
-    await expect(changesPanel.locator(".issue-item").first()).toContainText("Create worktree");
+    const palette = page.getByTestId("command-palette");
+    await expect(palette).toBeVisible();
+    await expect(palette.locator('[data-palette-item-id="issue-512"]')).toContainText(
+      "Ship daemon-backed issue worktrees",
+    );
+    await expect(palette.locator('[data-palette-item-id="issue-512"]')).toContainText("PR #365");
+    await expect(palette.locator('[data-palette-item-id="issue-512"]')).toContainText(
+      "codex/github-512-ship-httpd-issues",
+    );
+    await expect(palette.locator('[data-palette-item-id="issue-513"]')).toContainText(
+      "Teach the command palette about issues",
+    );
+
+    await paletteInput.press("ArrowDown");
+    await paletteInput.press("Enter");
+
+    const modal = page.getByTestId("create-worktree-modal");
+    await expect(modal).toBeVisible();
+    await expect(modal.locator(".worktree-input")).toHaveValue("github-513-command-palette-issues");
+    await expect(palette).toBeHidden();
   });
 
   test("issue selection opens a prefilled managed worktree modal", async ({ page }) => {
@@ -352,22 +382,22 @@ test.describe("Arbor Web UI", () => {
     await changesPanel.getByRole("button", { name: /Issues/ }).click();
     await expect(changesPanel.getByText("Ship daemon-backed issue worktrees")).toBeVisible();
 
-    await page.locator(".issue-item").first().click();
+    await page.locator(".issue-item").nth(1).click();
 
     const modal = page.getByTestId("create-worktree-modal");
     await expect(modal).toBeVisible();
     await expect(modal.locator(".overlay-title")).toHaveText("Create Worktree");
-    await expect(modal.locator(".worktree-input")).toHaveValue("github-512-ship-httpd-issues");
-    await expect(modal.getByText("codex/github-512-ship-httpd-issues")).toBeVisible();
+    await expect(modal.locator(".worktree-input")).toHaveValue("github-513-command-palette-issues");
+    await expect(modal.getByText("codex/github-513-command-palette-issues")).toBeVisible();
     await expect(
-      modal.getByText("/Users/penso/.arbor/worktrees/arbor/github-512-ship-httpd-issues"),
+      modal.getByText("/Users/penso/.arbor/worktrees/arbor/github-513-command-palette-issues"),
     ).toBeVisible();
 
     await modal.getByRole("button", { name: "Create worktree" }).click();
 
     await expect(modal).toBeHidden();
     await expect(
-      page.getByTestId("sidebar").getByText("codex/github-512-ship-httpd-issues"),
+      page.getByTestId("sidebar").getByText("codex/github-513-command-palette-issues"),
     ).toBeVisible();
   });
 

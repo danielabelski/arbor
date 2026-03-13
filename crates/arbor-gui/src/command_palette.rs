@@ -1,6 +1,7 @@
 impl ArborWindow {
     fn open_command_palette(&mut self, cx: &mut Context<Self>) {
         self.command_palette_modal = Some(CommandPaletteModal {
+            scope: CommandPaletteScope::Actions,
             query: String::new(),
             query_cursor: 0,
             selected_index: 0,
@@ -14,7 +15,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn command_palette_items(&self) -> Vec<CommandPaletteItem> {
+    fn command_palette_action_items(&self) -> Vec<CommandPaletteItem> {
         let mut items = vec![
             CommandPaletteItem {
                 title: "New Worktree".to_owned(),
@@ -29,10 +30,10 @@ impl ArborWindow {
                 action: CommandPaletteAction::OpenReviewPullRequest,
             },
             CommandPaletteItem {
-                title: "Issues".to_owned(),
-                subtitle: "Show issues for the selected repository".to_owned(),
+                title: "View Issues".to_owned(),
+                subtitle: "Browse repository issues in the command palette".to_owned(),
                 search_text: "issues github gitlab linear tickets bugs".to_owned(),
-                action: CommandPaletteAction::OpenIssues,
+                action: CommandPaletteAction::BrowseIssues,
             },
             CommandPaletteItem {
                 title: "Refresh Worktrees".to_owned(),
@@ -160,46 +161,89 @@ impl ArborWindow {
         items
     }
 
+    fn command_palette_issue_items(&self) -> Vec<CommandPaletteItem> {
+        self.issues
+            .iter()
+            .map(|issue| {
+                let mut subtitle_parts = vec![issue.state.clone()];
+                if let Some(review) = issue.linked_review.as_ref() {
+                    subtitle_parts.push(review.label.clone());
+                }
+                if let Some(branch) = issue.linked_branch.as_ref() {
+                    subtitle_parts.push(branch.clone());
+                }
+                if subtitle_parts.len() == 1 {
+                    subtitle_parts.push("Create worktree".to_owned());
+                }
+
+                CommandPaletteItem {
+                    title: format!("{} {}", issue.display_id, issue.title),
+                    subtitle: subtitle_parts.join(" · "),
+                    search_text: format!(
+                        "issue issues {} {} {} {} {} {} {}",
+                        issue.display_id.to_ascii_lowercase(),
+                        issue.id.to_ascii_lowercase(),
+                        issue.title.to_ascii_lowercase(),
+                        issue.state.to_ascii_lowercase(),
+                        issue.suggested_worktree_name.to_ascii_lowercase(),
+                        issue
+                            .linked_branch
+                            .as_deref()
+                            .unwrap_or_default()
+                            .to_ascii_lowercase(),
+                        issue
+                            .linked_review
+                            .as_ref()
+                            .map(|review| review.label.to_ascii_lowercase())
+                            .unwrap_or_default(),
+                    ),
+                    action: CommandPaletteAction::OpenIssueCreateModal(issue.clone()),
+                }
+            })
+            .collect()
+    }
+
     fn filtered_command_palette_items(&self) -> Vec<CommandPaletteItem> {
         let Some(modal) = self.command_palette_modal.as_ref() else {
             return Vec::new();
         };
 
         let query = modal.query.trim().to_ascii_lowercase();
+        let items = match modal.scope {
+            CommandPaletteScope::Actions => self.command_palette_action_items(),
+            CommandPaletteScope::Issues => self.command_palette_issue_items(),
+        };
+
         if query.is_empty() {
-            return self.command_palette_items();
+            return items;
         }
 
-        let mut matches = self
-            .command_palette_items()
+        let mut matches = items
             .into_iter()
             .filter_map(|item| {
-                command_palette_match_score(&item, &query).map(|score| {
-                    (
-                        self.command_palette_recent_rank(&item),
-                        self.command_palette_context_rank(&item),
-                        score,
-                        item,
-                    )
-                })
+                command_palette_match_score(&item, &query)
+                    .map(|score| (self.command_palette_sort_rank(&item), score, item))
             })
             .collect::<Vec<_>>();
-        matches.sort_by(
-            |(left_recent, left_context, left_score, left_item),
-             (right_recent, right_context, right_score, right_item)| {
-                left_recent
-                    .cmp(right_recent)
-                    .then_with(|| left_context.cmp(right_context))
-                    .then_with(|| left_score.cmp(right_score))
+        matches.sort_by(|(left_rank, left_score, left_item), (right_rank, right_score, right_item)| {
+            left_rank
+                .cmp(right_rank)
+                .then_with(|| left_score.cmp(right_score))
                     .then_with(|| {
                         left_item
                             .title
                             .to_ascii_lowercase()
                             .cmp(&right_item.title.to_ascii_lowercase())
                     })
-            },
-        );
-        matches.into_iter().map(|(_, _, _, item)| item).collect()
+        });
+        matches.into_iter().map(|(_, _, item)| item).collect()
+    }
+
+    fn command_palette_sort_rank(&self, item: &CommandPaletteItem) -> (usize, usize) {
+        (
+            self.command_palette_recent_rank(item),
+            self.command_palette_context_rank(item),
+        )
     }
 
     fn command_palette_recent_rank(&self, item: &CommandPaletteItem) -> usize {
@@ -226,6 +270,7 @@ impl ArborWindow {
                     2
                 }
             },
+            CommandPaletteAction::OpenIssueCreateModal(_) => 0,
             CommandPaletteAction::LaunchRepoPreset(_) => 1,
             CommandPaletteAction::LaunchTaskTemplate(task) => self
                 .active_repository_index
@@ -236,7 +281,7 @@ impl ArborWindow {
                 usize::from(self.active_preset_tab != Some(*kind)) + 1
             },
             CommandPaletteAction::OpenCreateWorktree
-            | CommandPaletteAction::OpenIssues
+            | CommandPaletteAction::BrowseIssues
             | CommandPaletteAction::OpenReviewPullRequest
             | CommandPaletteAction::RefreshWorktrees
             | CommandPaletteAction::ToggleCompactSidebar
@@ -244,6 +289,53 @@ impl ArborWindow {
             | CommandPaletteAction::OpenThemePicker
             | CommandPaletteAction::SetExecutionMode(_) => 3,
         }
+    }
+
+    fn show_command_palette_issues(&mut self, cx: &mut Context<Self>) {
+        if let Some(modal) = self.command_palette_modal.as_mut() {
+            modal.scope = CommandPaletteScope::Issues;
+            modal.query.clear();
+            modal.query_cursor = 0;
+            modal.selected_index = 0;
+        }
+        self.command_palette_scroll_handle.scroll_to_item(0);
+
+        if !self.command_palette_has_issue_snapshot_for_current_selection() {
+            self.refresh_issues(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn command_palette_has_issue_snapshot_for_current_selection(&self) -> bool {
+        let Some(target) = self.issue_target_for_current_selection() else {
+            return false;
+        };
+
+        self.issues_target.as_ref() == Some(&target)
+            && !self.issues_loading
+            && (!self.issues.is_empty()
+                || self.issue_source.is_some()
+                || self.issues_notice.is_some()
+                || self.issues_error.is_some())
+    }
+
+    fn dismiss_command_palette_layer(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.command_palette_modal.as_mut() else {
+            return;
+        };
+
+        if modal.scope == CommandPaletteScope::Issues {
+            modal.scope = CommandPaletteScope::Actions;
+            modal.query.clear();
+            modal.query_cursor = 0;
+            modal.selected_index = 0;
+            self.command_palette_scroll_handle.scroll_to_item(0);
+            cx.notify();
+            return;
+        }
+
+        self.close_command_palette(cx);
     }
 
     fn remember_command_palette_action(&mut self, item: &CommandPaletteItem) {
@@ -265,22 +357,28 @@ impl ArborWindow {
             return;
         };
 
-        self.command_palette_modal = None;
         self.remember_command_palette_action(&item);
         match item.action {
+            CommandPaletteAction::BrowseIssues => {
+                self.show_command_palette_issues(cx);
+                return;
+            },
             CommandPaletteAction::OpenCreateWorktree => {
+                self.command_palette_modal = None;
                 let repo_index = self.active_repository_index.unwrap_or(0);
                 self.open_create_modal(repo_index, CreateModalTab::LocalWorktree, cx);
             },
-            CommandPaletteAction::OpenIssues => {
-                self.set_right_pane_tab(RightPaneTab::Issues, cx);
-            },
             CommandPaletteAction::OpenReviewPullRequest => {
+                self.command_palette_modal = None;
                 let repo_index = self.active_repository_index.unwrap_or(0);
                 self.open_create_modal(repo_index, CreateModalTab::ReviewPullRequest, cx);
             },
-            CommandPaletteAction::RefreshWorktrees => self.refresh_worktrees(cx),
+            CommandPaletteAction::RefreshWorktrees => {
+                self.command_palette_modal = None;
+                self.refresh_worktrees(cx);
+            },
             CommandPaletteAction::ToggleCompactSidebar => {
+                self.command_palette_modal = None;
                 self.compact_sidebar = !self.compact_sidebar;
                 self.notice = Some(if self.compact_sidebar {
                     "compact sidebar enabled".to_owned()
@@ -289,20 +387,40 @@ impl ArborWindow {
                 });
                 self.sync_ui_state_store(window);
             },
-            CommandPaletteAction::OpenSettings => self.open_settings_modal(cx),
-            CommandPaletteAction::OpenThemePicker => self.open_theme_picker_modal(cx),
+            CommandPaletteAction::OpenSettings => {
+                self.command_palette_modal = None;
+                self.open_settings_modal(cx);
+            },
+            CommandPaletteAction::OpenThemePicker => {
+                self.command_palette_modal = None;
+                self.open_theme_picker_modal(cx);
+            },
             CommandPaletteAction::SetExecutionMode(mode) => {
+                self.command_palette_modal = None;
                 self.set_execution_mode(mode, window, cx);
             },
             CommandPaletteAction::LaunchAgentPreset(preset) => {
+                self.command_palette_modal = None;
                 self.launch_agent_preset(preset, window, cx);
             },
             CommandPaletteAction::LaunchRepoPreset(index) => {
+                self.command_palette_modal = None;
                 self.launch_repo_preset(index, window, cx);
             },
-            CommandPaletteAction::SelectRepository(index) => self.select_repository(index, cx),
-            CommandPaletteAction::SelectWorktree(index) => self.select_worktree(index, window, cx),
+            CommandPaletteAction::SelectRepository(index) => {
+                self.command_palette_modal = None;
+                self.select_repository(index, cx);
+            },
+            CommandPaletteAction::SelectWorktree(index) => {
+                self.command_palette_modal = None;
+                self.select_worktree(index, window, cx);
+            },
+            CommandPaletteAction::OpenIssueCreateModal(issue) => {
+                self.command_palette_modal = None;
+                self.open_issue_create_modal(issue, cx);
+            },
             CommandPaletteAction::LaunchTaskTemplate(task) => {
+                self.command_palette_modal = None;
                 self.launch_task_template(&task, window, cx);
             },
         }
@@ -443,6 +561,7 @@ impl ArborWindow {
         let theme = self.theme();
         let items = self.filtered_command_palette_items();
         let item_count = items.len();
+        let empty_message = self.command_palette_empty_message(&modal);
         let selected_index = if items.is_empty() {
             0
         } else {
@@ -466,7 +585,7 @@ impl ArborWindow {
                     .py_3()
                     .text_sm()
                     .text_color(rgb(theme.text_muted))
-                    .child("No results"),
+                    .child(empty_message),
             );
         }
 
@@ -573,7 +692,12 @@ impl ArborWindow {
                                 active_input_display(
                                     theme,
                                     &modal.query,
-                                    "Search actions, worktrees, presets...",
+                                    match modal.scope {
+                                        CommandPaletteScope::Actions => {
+                                            "Search actions, worktrees, presets..."
+                                        },
+                                        CommandPaletteScope::Issues => "Search issues...",
+                                    },
                                     theme.text_primary,
                                     modal.query_cursor,
                                     72,
@@ -584,11 +708,45 @@ impl ArborWindow {
                                     .flex_none()
                                     .text_xs()
                                     .text_color(rgb(theme.text_muted))
-                                    .child(format!("{item_count} results")),
+                                    .child(match modal.scope {
+                                        CommandPaletteScope::Actions => {
+                                            format!("{item_count} results")
+                                        },
+                                        CommandPaletteScope::Issues => {
+                                            format!("{item_count} issues")
+                                        },
+                                    }),
                             ),
                     )
                     .child(results),
             )
+    }
+}
+
+impl ArborWindow {
+    fn command_palette_empty_message(&self, modal: &CommandPaletteModal) -> String {
+        match modal.scope {
+            CommandPaletteScope::Actions => "No results".to_owned(),
+            CommandPaletteScope::Issues => {
+                if self.issue_target_for_current_selection().is_none() {
+                    if self.active_outpost_index.is_some() {
+                        "Issues are unavailable for SSH outposts.".to_owned()
+                    } else {
+                        "Select a daemon-backed repository to browse issues.".to_owned()
+                    }
+                } else if self.issues_loading {
+                    "Loading issues…".to_owned()
+                } else if let Some(error) = self.issues_error.as_ref() {
+                    error.clone()
+                } else if let Some(notice) = self.issues_notice.as_ref() {
+                    notice.clone()
+                } else if modal.query.trim().is_empty() {
+                    "No issues found for this repository.".to_owned()
+                } else {
+                    "No matching issues.".to_owned()
+                }
+            },
+        }
     }
 }
 
@@ -597,7 +755,7 @@ fn command_palette_icon(action: &CommandPaletteAction, theme: ThemePalette) -> A
         CommandPaletteAction::OpenCreateWorktree => {
             command_palette_glyph_icon("\u{f055}", 0x98c379, theme)
         },
-        CommandPaletteAction::OpenIssues => {
+        CommandPaletteAction::BrowseIssues | CommandPaletteAction::OpenIssueCreateModal(_) => {
             command_palette_glyph_icon("\u{f145}", 0x61afef, theme)
         },
         CommandPaletteAction::OpenReviewPullRequest => {
@@ -744,7 +902,13 @@ fn command_palette_scrollbar_indicator(
 }
 
 fn command_palette_action_key(item: &CommandPaletteItem) -> String {
-    format!("{}|{}", item.title, item.subtitle)
+    match &item.action {
+        CommandPaletteAction::BrowseIssues => "command-palette:browse-issues".to_owned(),
+        CommandPaletteAction::OpenIssueCreateModal(issue) => {
+            format!("command-palette:issue:{}", issue.id)
+        },
+        _ => format!("{}|{}", item.title, item.subtitle),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

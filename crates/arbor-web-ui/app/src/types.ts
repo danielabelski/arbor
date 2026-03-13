@@ -50,6 +50,14 @@ export type IssueSource = {
   url: string | null;
 };
 
+export type IssueReviewKind = "pull_request" | "merge_request";
+
+export type IssueReview = {
+  kind: IssueReviewKind;
+  label: string;
+  url: string | null;
+};
+
 export type Issue = {
   id: string;
   display_id: string;
@@ -58,6 +66,8 @@ export type Issue = {
   url: string | null;
   suggested_worktree_name: string;
   updated_at: string | null;
+  linked_branch: string | null;
+  linked_review: IssueReview | null;
 };
 
 export type IssueListResponse = {

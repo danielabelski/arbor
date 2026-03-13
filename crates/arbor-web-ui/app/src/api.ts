@@ -8,6 +8,8 @@ import type {
   ProcessInfo,
   ProcessStatus,
   Issue,
+  IssueReview,
+  IssueReviewKind,
   IssueListResponse,
   IssueSource,
   ManagedWorktreePreview,
@@ -187,6 +189,27 @@ function parseIssueSource(item: unknown): IssueSource | null {
   };
 }
 
+function parseIssueReviewKind(value: unknown): IssueReviewKind | null {
+  if (value === "pull_request" || value === "merge_request") {
+    return value;
+  }
+  return null;
+}
+
+function parseIssueReview(item: unknown): IssueReview | null {
+  if (!isRecord(item)) return null;
+  const kind = parseIssueReviewKind(item["kind"]);
+  const label = readString(item["label"]);
+  if (kind === null || label === null) {
+    return null;
+  }
+  return {
+    kind,
+    label,
+    url: readString(item["url"]),
+  };
+}
+
 function parseIssue(item: unknown): Issue | null {
   if (!isRecord(item)) return null;
   const id = readString(item["id"]);
@@ -211,6 +234,8 @@ function parseIssue(item: unknown): Issue | null {
     url: readString(item["url"]),
     suggested_worktree_name: suggestedWorktreeName,
     updated_at: readString(item["updated_at"]),
+    linked_branch: readString(item["linked_branch"]),
+    linked_review: parseIssueReview(item["linked_review"]),
   };
 }
 

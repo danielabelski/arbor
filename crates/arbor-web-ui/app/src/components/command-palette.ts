@@ -1,8 +1,18 @@
-import { refresh } from "../state";
-import { setRightPanelTab } from "../state";
+import { openCreateWorktreeModal } from "./create-worktree-modal";
+import {
+  refresh,
+  refreshIssues,
+  selectedIssueRepoRoot,
+  setRightPanelTab,
+  state,
+  subscribe,
+} from "../state";
+import type { Issue } from "../types";
 import { el } from "../utils";
 
-type PaletteAction = {
+type PaletteMode = "actions" | "issues";
+
+type PaletteItem = {
   id: string;
   title: string;
   subtitle: string;
@@ -14,17 +24,18 @@ let overlay: HTMLDivElement | null = null;
 let inputEl: HTMLInputElement | null = null;
 let resultsEl: HTMLDivElement | null = null;
 let open = false;
+let mode: PaletteMode = "actions";
 let query = "";
 let selectedIndex = 0;
 
-const ACTIONS: PaletteAction[] = [
+const ACTIONS: PaletteItem[] = [
   {
     id: "issues",
-    title: "Issues",
-    subtitle: "View repository issues",
-    keywords: "issues github gitlab linear right panel",
+    title: "View Issues",
+    subtitle: "Browse repository issues in the command palette",
+    keywords: "issues github gitlab linear command palette tickets bugs",
     run: () => {
-      setRightPanelTab("issues");
+      openIssuesMode();
     },
   },
   {
@@ -33,6 +44,7 @@ const ACTIONS: PaletteAction[] = [
     subtitle: "View changed files",
     keywords: "changes files diff right panel",
     run: () => {
+      closeCommandPalette();
       setRightPanelTab("changes");
     },
   },
@@ -42,6 +54,7 @@ const ACTIONS: PaletteAction[] = [
     subtitle: "Reload repositories, worktrees, and terminals",
     keywords: "refresh reload sync fetch",
     run: () => {
+      closeCommandPalette();
       void refresh();
     },
   },
@@ -62,7 +75,6 @@ export function createCommandPalette(): HTMLElement {
   inputEl = document.createElement("input");
   inputEl.className = "palette-input";
   inputEl.type = "text";
-  inputEl.placeholder = "Search actions…";
   inputEl.autocomplete = "off";
   inputEl.spellcheck = false;
   inputEl.addEventListener("input", () => {
@@ -97,12 +109,14 @@ export function createCommandPalette(): HTMLElement {
     handlePaletteKeydown(event);
   });
 
+  subscribe(render);
   render();
   return overlay;
 }
 
 function openCommandPalette(): void {
   open = true;
+  mode = "actions";
   query = "";
   selectedIndex = 0;
   if (inputEl !== null) {
@@ -114,11 +128,110 @@ function openCommandPalette(): void {
 
 function closeCommandPalette(): void {
   open = false;
+  mode = "actions";
+  query = "";
+  selectedIndex = 0;
+  if (inputEl !== null) {
+    inputEl.value = "";
+  }
   render();
 }
 
+function openIssuesMode(): void {
+  mode = "issues";
+  query = "";
+  selectedIndex = 0;
+  if (inputEl !== null) {
+    inputEl.value = "";
+  }
+
+  const repoRoot = selectedIssueRepoRoot();
+  if (repoRoot !== null) {
+    refreshIssues(
+      repoRoot,
+      state.issuesRepoRoot !== repoRoot || state.issuesLoadedRepoRoot !== repoRoot,
+    );
+  }
+
+  render();
+  requestAnimationFrame(() => inputEl?.focus());
+}
+
+function buildIssuePaletteItem(issue: Issue): PaletteItem {
+  const subtitleParts = [issue.state];
+  if (issue.linked_review !== null) {
+    subtitleParts.push(issue.linked_review.label);
+  }
+  if (issue.linked_branch !== null) {
+    subtitleParts.push(issue.linked_branch);
+  }
+  if (subtitleParts.length === 1) {
+    subtitleParts.push("Create worktree");
+  }
+
+  return {
+    id: `issue-${issue.id}`,
+    title: `${issue.display_id} ${issue.title}`,
+    subtitle: subtitleParts.join(" · "),
+    keywords: [
+      "issue",
+      "issues",
+      issue.id,
+      issue.display_id,
+      issue.title,
+      issue.state,
+      issue.suggested_worktree_name,
+      issue.linked_branch ?? "",
+      issue.linked_review?.label ?? "",
+    ]
+      .join(" ")
+      .toLowerCase(),
+    run: () => {
+      closeCommandPalette();
+      openCreateWorktreeModal(issue);
+    },
+  };
+}
+
+function filteredItems(): PaletteItem[] {
+  const trimmed = query.trim().toLowerCase();
+  const items = mode === "actions" ? ACTIONS : state.issues.map(buildIssuePaletteItem);
+  if (trimmed.length === 0) {
+    return items;
+  }
+
+  return items.filter((item) => {
+    const haystack = `${item.title} ${item.subtitle} ${item.keywords}`.toLowerCase();
+    return haystack.includes(trimmed);
+  });
+}
+
+function emptyMessage(): string {
+  if (mode === "actions") {
+    return "No matching actions";
+  }
+
+  const repoRoot = selectedIssueRepoRoot();
+  if (repoRoot === null) {
+    return "Select a repository to browse issues";
+  }
+  if (state.issuesLoading) {
+    return "Loading issues…";
+  }
+  if (state.issuesError !== null) {
+    return state.issuesError;
+  }
+  if (state.issuesNotice !== null) {
+    return state.issuesNotice;
+  }
+  if (query.trim().length > 0) {
+    return "No matching issues";
+  }
+  return "No open issues";
+}
+
 function render(): void {
-  if (overlay === null || resultsEl === null) {
+  if (overlay === null || resultsEl === null || inputEl === null) {
     return;
   }
 
@@ -130,21 +243,24 @@ function render(): void {
     return;
   }
 
-  const items = filteredActions();
+  inputEl.placeholder = mode === "actions" ? "Search actions…" : "Search issues…";
+
+  const items = filteredItems();
   if (items.length === 0) {
-    resultsEl.append(el("div", "palette-empty", "No matching actions"));
+    resultsEl.append(el("div", "palette-empty", emptyMessage()));
     return;
   }
 
-  items.forEach((action, index) => {
+  items.forEach((itemData, index) => {
     const item = el("button", "palette-item");
     item.type = "button";
+    item.setAttribute("data-palette-item-id", itemData.id);
     if (index === selectedIndex) {
       item.classList.add("active");
     }
     item.append(
-      el("div", "palette-item-title", action.title),
-      el("div", "palette-item-subtitle", action.subtitle),
+      el("div", "palette-item-title", itemData.title),
+      el("div", "palette-item-subtitle", itemData.subtitle),
     );
     item.addEventListener("mousemove", () => {
       if (selectedIndex !== index) {
@@ -153,22 +269,9 @@ function render(): void {
       }
     });
     item.addEventListener("click", () => {
-      closeCommandPalette();
-      action.run();
+      itemData.run();
     });
     resultsEl.append(item);
-  });
-}
-
-function filteredActions(): PaletteAction[] {
-  const trimmed = query.trim().toLowerCase();
-  if (trimmed.length === 0) {
-    return ACTIONS;
-  }
-
-  return ACTIONS.filter((action) => {
-    const haystack = `${action.title} ${action.subtitle} ${action.keywords}`.toLowerCase();
-    return haystack.includes(trimmed);
   });
 }
 
@@ -179,11 +282,21 @@ function handlePaletteKeydown(event: KeyboardEvent): void {
 
   if (event.key === "Escape") {
     event.preventDefault();
-    closeCommandPalette();
+    if (mode === "issues") {
+      mode = "actions";
+      query = "";
+      selectedIndex = 0;
+      if (inputEl !== null) {
+        inputEl.value = "";
+      }
+      render();
+    } else {
+      closeCommandPalette();
+    }
     return;
   }
 
-  const items = filteredActions();
+  const items = filteredItems();
   if (event.key === "ArrowDown") {
     event.preventDefault();
     if (items.length > 0) {
@@ -206,7 +319,6 @@ function handlePaletteKeydown(event: KeyboardEvent): void {
     event.preventDefault();
     const selected = items[selectedIndex];
     if (selected !== undefined) {
-      closeCommandPalette();
       selected.run();
     }
   }

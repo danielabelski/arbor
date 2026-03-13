@@ -1346,9 +1346,16 @@ struct CommitModal {
 
 #[derive(Debug, Clone)]
 struct CommandPaletteModal {
+    scope: CommandPaletteScope,
     query: String,
     query_cursor: usize,
     selected_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandPaletteScope {
+    Actions,
+    Issues,
 }
 
 #[derive(Debug, Clone)]
@@ -1362,7 +1369,7 @@ struct CommandPaletteItem {
 #[derive(Debug, Clone)]
 enum CommandPaletteAction {
     OpenCreateWorktree,
-    OpenIssues,
+    BrowseIssues,
     OpenReviewPullRequest,
     RefreshWorktrees,
     ToggleCompactSidebar,
@@ -1373,6 +1380,7 @@ enum CommandPaletteAction {
     LaunchRepoPreset(usize),
     SelectRepository(usize),
     SelectWorktree(usize),
+    OpenIssueCreateModal(terminal_daemon_http::IssueDto),
     LaunchTaskTemplate(TaskTemplate),
 }
 

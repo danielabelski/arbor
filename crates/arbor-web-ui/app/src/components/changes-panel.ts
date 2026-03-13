@@ -130,6 +130,15 @@ function renderIssuesContent(): HTMLElement {
 
   const list = el("div", "issues-list");
   for (const issue of state.issues) {
+    const linkedReview = issue.linked_review;
+    const linkedBranch = issue.linked_branch;
+    const issueActionLabel = linkedReview !== null
+      ? linkedReview.kind === "merge_request"
+        ? "MR exists"
+        : "PR exists"
+      : linkedBranch !== null
+        ? "Branch exists"
+        : "Create worktree";
     const item = el("article", "issue-item");
     item.setAttribute("role", "button");
     item.tabIndex = 0;
@@ -159,14 +168,43 @@ function renderIssuesContent(): HTMLElement {
       topRow.append(link);
     }
 
+    if (linkedReview !== null || linkedBranch !== null) {
+      const linkedRow = el("div", "issue-linked");
+
+      if (linkedReview !== null) {
+        if (linkedReview.url !== null) {
+          const reviewLink = document.createElement("a");
+          reviewLink.className = "issue-linked-chip issue-linked-review";
+          reviewLink.href = linkedReview.url;
+          reviewLink.target = "_blank";
+          reviewLink.rel = "noopener";
+          reviewLink.textContent = linkedReview.label;
+          reviewLink.addEventListener("click", (event) => {
+            event.stopPropagation();
+          });
+          linkedRow.append(reviewLink);
+        } else {
+          linkedRow.append(el("span", "issue-linked-chip issue-linked-review", linkedReview.label));
+        }
+      }
+
+      if (linkedBranch !== null) {
+        linkedRow.append(el("span", "issue-linked-chip issue-linked-branch", linkedBranch));
+      }
+
+      item.append(topRow, linkedRow);
+    } else {
+      item.append(topRow);
+    }
+
     const bottomRow = el("div", "issue-item-bottom");
     bottomRow.append(
       el("span", "issue-state", issue.state),
       el("span", "issue-age", issue.updated_at === null ? "recently" : formatIssueAge(issue.updated_at)),
-      el("span", "issue-cta", "Create worktree"),
+      el("span", "issue-cta", issueActionLabel),
     );
 
-    item.append(topRow, bottomRow);
+    item.append(bottomRow);
     list.append(item);
   }
 

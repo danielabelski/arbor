@@ -27,6 +27,20 @@ pub struct IssueSourceDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueReviewKind {
+    PullRequest,
+    MergeRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct IssueReviewDto {
+    pub kind: IssueReviewKind,
+    pub label: String,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct IssueDto {
     pub id: String,
     pub display_id: String,
@@ -35,6 +49,8 @@ pub struct IssueDto {
     pub url: Option<String>,
     pub suggested_worktree_name: String,
     pub updated_at: Option<String>,
+    pub linked_branch: Option<String>,
+    pub linked_review: Option<IssueReviewDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

@@ -2531,7 +2531,7 @@ impl ArborWindow {
         if self.command_palette_modal.is_some() {
             match event.keystroke.key.as_str() {
                 "escape" => {
-                    self.close_command_palette(cx);
+                    self.dismiss_command_palette_layer(cx);
                     cx.stop_propagation();
                     return;
                 },

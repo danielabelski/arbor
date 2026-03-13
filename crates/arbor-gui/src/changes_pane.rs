@@ -164,6 +164,14 @@ impl ArborWindow {
                     || issue.display_id.to_ascii_lowercase().contains(&search_lower)
                     || issue.title.to_ascii_lowercase().contains(&search_lower)
                     || issue.state.to_ascii_lowercase().contains(&search_lower)
+                    || issue
+                        .linked_branch
+                        .as_ref()
+                        .is_some_and(|branch| branch.to_ascii_lowercase().contains(&search_lower))
+                    || issue
+                        .linked_review
+                        .as_ref()
+                        .is_some_and(|review| review.label.to_ascii_lowercase().contains(&search_lower))
             })
             .cloned()
             .collect();
@@ -244,6 +252,18 @@ impl ArborWindow {
         for (row_id, issue) in filtered_issues.into_iter().enumerate() {
             let issue_context = issue.clone();
             let updated_at = issue.updated_at.clone().unwrap_or_else(|| "-".to_owned());
+            let linked_review = issue.linked_review.clone();
+            let linked_branch = issue.linked_branch.clone();
+            let issue_status_label = if let Some(review) = linked_review.as_ref() {
+                match review.kind {
+                    terminal_daemon_http::IssueReviewKind::PullRequest => "PR exists",
+                    terminal_daemon_http::IssueReviewKind::MergeRequest => "MR exists",
+                }
+            } else if linked_branch.is_some() {
+                "Branch exists"
+            } else {
+                "Create worktree"
+            };
 
             issues_body = issues_body.child(
                 div()
@@ -291,6 +311,70 @@ impl ArborWindow {
                             .text_color(rgb(theme.text_primary))
                             .child(issue.title),
                     )
+                    .when(linked_review.is_some() || linked_branch.is_some(), |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_1()
+                                .when_some(linked_review.clone(), |this, review| {
+                                    let review_url = review.url.clone();
+                                    let review_color = match review.kind {
+                                        terminal_daemon_http::IssueReviewKind::PullRequest => {
+                                            theme.accent
+                                        },
+                                        terminal_daemon_http::IssueReviewKind::MergeRequest => {
+                                            0x72d69c
+                                        },
+                                    };
+                                    this.child(
+                                        div()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(rgb(review_color))
+                                            .bg(rgb(theme.panel_active_bg))
+                                            .px_1()
+                                            .py(px(2.))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(review_color))
+                                            .when(review_url.is_some(), |this| {
+                                                this.cursor_pointer()
+                                                    .hover(|this| {
+                                                        this.bg(rgb(theme.tab_active_bg))
+                                                    })
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(move |this, _, _, cx| {
+                                                            if let Some(url) =
+                                                                review_url.as_deref()
+                                                            {
+                                                                this.open_external_url(url, cx);
+                                                                cx.stop_propagation();
+                                                            }
+                                                        }),
+                                                    )
+                                            })
+                                            .child(review.label),
+                                    )
+                                })
+                                .when_some(linked_branch.clone(), |this, branch| {
+                                    this.child(
+                                        div()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(rgb(theme.border))
+                                            .bg(rgb(theme.sidebar_bg))
+                                            .px_1()
+                                            .py(px(2.))
+                                            .text_xs()
+                                            .font_family(FONT_MONO)
+                                            .text_color(rgb(theme.text_muted))
+                                            .child(branch),
+                                    )
+                                }),
+                        )
+                    })
                     .child(
                         div()
                             .flex()
@@ -306,6 +390,20 @@ impl ArborWindow {
                                     .text_xs()
                                     .text_color(rgb(theme.text_muted))
                                     .child(issue.suggested_worktree_name),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(if linked_review.is_some() {
+                                        theme.accent
+                                    } else if linked_branch.is_some() {
+                                        theme.text_primary
+                                    } else {
+                                        theme.text_disabled
+                                    }))
+                                    .child(issue_status_label),
                             )
                             .child(
                                 div()
@@ -383,10 +481,14 @@ impl ArborWindow {
         let selected_path = self.selected_changed_file.clone();
         let can_run_actions = self.can_run_local_git_actions();
         let is_busy = self.git_action_in_flight.is_some();
+        let selected_worktree_has_pull_request = self.selected_local_worktree_has_pull_request();
         let commit_enabled = can_run_actions && !is_busy && !self.changed_files.is_empty();
-        let stacked_pr_enabled = can_run_actions && !is_busy && !self.changed_files.is_empty();
+        let stacked_pr_enabled = can_run_actions
+            && !is_busy
+            && !self.changed_files.is_empty()
+            && !selected_worktree_has_pull_request;
         let push_enabled = can_run_actions && !is_busy;
-        let pr_enabled = can_run_actions && !is_busy;
+        let pr_enabled = can_run_actions && !is_busy && !selected_worktree_has_pull_request;
         let search_lower = self.right_pane_search.to_lowercase();
         let filtered_changes: Vec<_> = self
             .changed_files

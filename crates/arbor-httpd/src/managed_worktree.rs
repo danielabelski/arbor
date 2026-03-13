@@ -13,6 +13,12 @@ pub(crate) struct ManagedWorktreePreview {
     pub(crate) worktree_path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedWorktreeNaming {
+    pub(crate) sanitized_worktree_name: String,
+    pub(crate) branch_name: String,
+}
+
 pub(crate) fn preview_managed_worktree(
     repo_root: &Path,
     worktree_name: &str,
@@ -21,6 +27,25 @@ pub(crate) fn preview_managed_worktree(
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "repository root has no terminal directory name".to_owned())?;
+    let naming = derive_managed_worktree_naming(repo_root, worktree_name)?;
+    let worktree_path =
+        build_managed_worktree_path(repository_name, &naming.sanitized_worktree_name)?;
+
+    Ok(ManagedWorktreePreview {
+        sanitized_worktree_name: naming.sanitized_worktree_name,
+        branch_name: naming.branch_name,
+        worktree_path,
+    })
+}
+
+pub(crate) fn sanitize_worktree_name(value: &str) -> String {
+    arbor_core::worktree_name::sanitize_worktree_name(value)
+}
+
+pub(crate) fn derive_managed_worktree_naming(
+    repo_root: &Path,
+    worktree_name: &str,
+) -> Result<ManagedWorktreeNaming, String> {
     let sanitized_worktree_name = sanitize_worktree_name(worktree_name);
     if sanitized_worktree_name.is_empty() {
         return Err("worktree name contains no usable characters".to_owned());
@@ -29,17 +54,11 @@ pub(crate) fn preview_managed_worktree(
     let github_login = branch_prefix_github_login_from_env();
     let branch_name =
         derive_branch_name_with_repo_config(repo_root, worktree_name, github_login.as_deref());
-    let worktree_path = build_managed_worktree_path(repository_name, &sanitized_worktree_name)?;
 
-    Ok(ManagedWorktreePreview {
+    Ok(ManagedWorktreeNaming {
         sanitized_worktree_name,
         branch_name,
-        worktree_path,
     })
-}
-
-pub(crate) fn sanitize_worktree_name(value: &str) -> String {
-    arbor_core::worktree_name::sanitize_worktree_name(value)
 }
 
 fn derive_branch_name(worktree_name: &str) -> String {

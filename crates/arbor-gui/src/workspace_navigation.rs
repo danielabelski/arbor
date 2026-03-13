@@ -157,6 +157,12 @@ impl ArborWindow {
         self.active_outpost_index.is_none() && self.selected_worktree_path().is_some()
     }
 
+    fn selected_local_worktree_has_pull_request(&self) -> bool {
+        self.active_worktree().is_some_and(|worktree| {
+            worktree.pr_number.is_some() || worktree.pr_url.is_some()
+        })
+    }
+
     fn active_worktree(&self) -> Option<&WorktreeSummary> {
         self.active_worktree_index
             .and_then(|index| self.worktrees.get(index))

@@ -1,6 +1,7 @@
 use {
     crate::{
         github_service::GitHubPrService,
+        issue_linking::{self, LinkedIssueWorktree},
         managed_worktree::preview_managed_worktree as build_managed_worktree_preview,
         process_manager::ProcessEvent,
         repository_store, task_scheduler,
@@ -190,12 +191,100 @@ pub(crate) async fn list_repository_issues(
 ) -> ApiResult<IssueListResponse> {
     let repo_root = PathBuf::from(query.repo_root);
     let issue_service = state.issue_service.clone();
-    let issues =
-        tokio::task::spawn_blocking(move || issue_service.list_repository_issues(&repo_root))
-            .await
-            .map_err(|error| internal_error(format!("failed to join issue fetch task: {error}")))?
-            .map_err(internal_error)?;
+    let repo_root_for_issue_fetch = repo_root.clone();
+    let mut issues = tokio::task::spawn_blocking(move || {
+        issue_service.list_repository_issues(&repo_root_for_issue_fetch)
+    })
+    .await
+    .map_err(|error| internal_error(format!("failed to join issue fetch task: {error}")))?
+    .map_err(internal_error)?;
+    if let Err(error) = enrich_issue_list_with_local_links(&state, &repo_root, &mut issues).await {
+        tracing::warn!(
+            repo_root = %repo_root.display(),
+            %error,
+            "failed to enrich repository issues with local worktree links"
+        );
+    }
     Ok(Json(issues))
+}
+
+async fn enrich_issue_list_with_local_links(
+    state: &AppState,
+    repo_root: &Path,
+    issues_response: &mut IssueListResponse,
+) -> Result<(), String> {
+    let linked_worktrees = collect_linked_issue_worktrees(state, repo_root).await?;
+    issue_linking::enrich_issues_with_worktree_links(
+        repo_root,
+        &mut issues_response.issues,
+        &linked_worktrees,
+    );
+    Ok(())
+}
+
+async fn collect_linked_issue_worktrees(
+    state: &AppState,
+    repo_root: &Path,
+) -> Result<Vec<LinkedIssueWorktree>, String> {
+    struct IssueWorktreeData {
+        path: PathBuf,
+        branch: String,
+        last_activity_unix_ms: Option<u64>,
+    }
+
+    let entries = worktree::list(repo_root).map_err(|error| {
+        format!(
+            "failed to list worktrees for `{}`: {error}",
+            repo_root.display()
+        )
+    })?;
+
+    let repo_slug = {
+        let mut repo_cache = state.repo_cache.lock().await;
+        let (repo_slug, _) = github_repo_slug_cached(&mut repo_cache, repo_root);
+        repo_slug
+    };
+
+    let worktrees: Vec<IssueWorktreeData> = entries
+        .into_iter()
+        .filter(|entry| !paths_equivalent(entry.path.as_path(), repo_root))
+        .map(|entry| IssueWorktreeData {
+            path: entry.path.clone(),
+            branch: entry
+                .branch
+                .as_deref()
+                .map(short_branch)
+                .unwrap_or_else(|| "-".to_owned()),
+            last_activity_unix_ms: worktree::last_git_activity_ms(&entry.path),
+        })
+        .collect();
+
+    let pr_futures: Vec<_> = worktrees
+        .iter()
+        .map(|worktree| {
+            let cache = state.pr_cache.clone();
+            let github_service = state.github_service.clone();
+            let repo_slug = repo_slug.clone();
+            let branch = worktree.branch.clone();
+            async move {
+                lookup_pr_cached(cache, github_service, repo_slug.as_deref(), &branch, false).await
+            }
+        })
+        .collect();
+
+    let pr_results = futures_util::future::join_all(pr_futures).await;
+
+    Ok(worktrees
+        .into_iter()
+        .zip(pr_results)
+        .map(|(worktree, (pr_number, pr_url))| LinkedIssueWorktree {
+            path: worktree.path,
+            branch: worktree.branch,
+            pr_number,
+            pr_url,
+            last_activity_unix_ms: worktree.last_activity_unix_ms,
+        })
+        .collect())
 }
 
 pub(crate) async fn list_worktrees(

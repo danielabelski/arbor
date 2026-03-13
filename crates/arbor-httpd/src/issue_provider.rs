@@ -186,6 +186,8 @@ impl RepositoryIssueProvider for GitHubIssueProvider {
                             &issue.title,
                         ),
                         updated_at: issue.updated_at,
+                        linked_branch: None,
+                        linked_review: None,
                     }),
             );
 
@@ -259,6 +261,8 @@ impl RepositoryIssueProvider for GitLabIssueProvider {
                 url: issue.web_url,
                 suggested_worktree_name: issue_worktree_name(&issue.iid.to_string(), &issue.title),
                 updated_at: issue.updated_at,
+                linked_branch: None,
+                linked_review: None,
             }));
 
             if page_len < ISSUE_PAGE_SIZE {

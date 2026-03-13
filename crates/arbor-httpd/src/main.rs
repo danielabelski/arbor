@@ -1,5 +1,6 @@
 mod auth;
 mod github_service;
+mod issue_linking;
 mod issue_provider;
 mod managed_worktree;
 #[cfg(feature = "mdns")]

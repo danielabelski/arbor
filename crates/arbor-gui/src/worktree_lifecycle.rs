@@ -1469,6 +1469,8 @@ impl ArborWindow {
                                         .when_some(issue_context.clone(), |this, issue| {
                                             this.child(
                                                 div()
+                                                    .w_full()
+                                                    .min_w_0()
                                                     .rounded_sm()
                                                     .border_1()
                                                     .border_color(rgb(theme.border))
@@ -1498,18 +1500,20 @@ impl ArborWindow {
                                                             ),
                                                     )
                                                     .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(rgb(theme.text_primary))
-                                                            .child(issue.title),
+                                                        modal_preview_line(
+                                                            modal_text_preview(&issue.title),
+                                                            theme.text_primary,
+                                                            false,
+                                                        ),
                                                     )
                                                     .when_some(issue.url, |this, url| {
                                                         this.child(
-                                                            div()
-                                                                .text_xs()
-                                                                .font_family(FONT_MONO)
-                                                                .text_color(rgb(theme.text_muted))
-                                                                .child(url),
+                                                            modal_preview_line(
+                                                                modal_mono_preview(&url),
+                                                                theme.text_muted,
+                                                                true,
+                                                            )
+                                                            .text_xs(),
                                                         )
                                                     }),
                                             )
@@ -1639,48 +1643,18 @@ impl ArborWindow {
                                             })),
                                         )
                                         .child(
-                                            div()
-                                                .flex_none()
-                                                .rounded_sm()
-                                                .border_1()
-                                                .border_color(rgb(theme.border))
-                                                .bg(rgb(theme.panel_bg))
-                                                .p_2()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(theme.text_muted))
-                                                        .child("Branch"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .font_family(FONT_MONO)
-                                                        .text_color(rgb(theme.text_primary))
-                                                        .child(branch_name),
-                                                ),
+                                            modal_preview_box(
+                                                theme,
+                                                "Branch",
+                                                modal_mono_preview(&branch_name),
+                                            ),
                                         )
                                         .child(
-                                            div()
-                                                .flex_none()
-                                                .rounded_sm()
-                                                .border_1()
-                                                .border_color(rgb(theme.border))
-                                                .bg(rgb(theme.panel_bg))
-                                                .p_2()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(theme.text_muted))
-                                                        .child("Path"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .font_family(FONT_MONO)
-                                                        .text_color(rgb(theme.text_primary))
-                                                        .child(target_path_preview),
-                                                ),
+                                            modal_preview_box(
+                                                theme,
+                                                "Path",
+                                                modal_mono_preview(&target_path_preview),
+                                            ),
                                         )
                                         .when_some(modal.managed_preview_error.clone(), |this, error| {
                                             this.child(
@@ -1848,48 +1822,18 @@ impl ArborWindow {
                                             })),
                                         )
                                         .child(
-                                            div()
-                                                .flex_none()
-                                                .rounded_sm()
-                                                .border_1()
-                                                .border_color(rgb(theme.border))
-                                                .bg(rgb(theme.panel_bg))
-                                                .p_2()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(theme.text_muted))
-                                                        .child("Branch"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .font_family(FONT_MONO)
-                                                        .text_color(rgb(theme.text_primary))
-                                                        .child(review_branch_preview),
-                                                ),
+                                            modal_preview_box(
+                                                theme,
+                                                "Branch",
+                                                modal_mono_preview(&review_branch_preview),
+                                            ),
                                         )
                                         .child(
-                                            div()
-                                                .flex_none()
-                                                .rounded_sm()
-                                                .border_1()
-                                                .border_color(rgb(theme.border))
-                                                .bg(rgb(theme.panel_bg))
-                                                .p_2()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(theme.text_muted))
-                                                        .child("Path"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .font_family(FONT_MONO)
-                                                        .text_color(rgb(theme.text_primary))
-                                                        .child(review_path_preview),
-                                                ),
+                                            modal_preview_box(
+                                                theme,
+                                                "Path",
+                                                modal_mono_preview(&review_path_preview),
+                                            ),
                                         )
                                     })
                                     // Remote Outpost tab content
@@ -2029,46 +1973,18 @@ impl ArborWindow {
                                             })),
                                         )
                                         .child(
-                                            div()
-                                                .rounded_sm()
-                                                .border_1()
-                                                .border_color(rgb(theme.border))
-                                                .bg(rgb(theme.panel_bg))
-                                                .p_2()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(theme.text_muted))
-                                                        .child("Branch"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .font_family(FONT_MONO)
-                                                        .text_color(rgb(theme.text_primary))
-                                                        .child(outpost_branch_preview),
-                                                ),
+                                            modal_preview_box(
+                                                theme,
+                                                "Branch",
+                                                modal_mono_preview(&outpost_branch_preview),
+                                            ),
                                         )
                                         .child(
-                                            div()
-                                                .rounded_sm()
-                                                .border_1()
-                                                .border_color(rgb(theme.border))
-                                                .bg(rgb(theme.panel_bg))
-                                                .p_2()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(theme.text_muted))
-                                                        .child("Remote Path"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .font_family(FONT_MONO)
-                                                        .text_color(rgb(theme.text_primary))
-                                                        .child(remote_preview),
-                                                ),
+                                            modal_preview_box(
+                                                theme,
+                                                "Remote Path",
+                                                modal_mono_preview(&remote_preview),
+                                            ),
                                         )
                                     }),
                             ),
@@ -2364,6 +2280,49 @@ impl ArborWindow {
                     ),
             )
     }
+}
+
+const CREATE_MODAL_MONO_PREVIEW_MAX_CHARS: usize = 56;
+const CREATE_MODAL_TEXT_PREVIEW_MAX_CHARS: usize = 72;
+
+fn modal_mono_preview(value: &str) -> String {
+    truncate_middle_text(value, CREATE_MODAL_MONO_PREVIEW_MAX_CHARS)
+}
+
+fn modal_text_preview(value: &str) -> String {
+    truncate_with_ellipsis(value, CREATE_MODAL_TEXT_PREVIEW_MAX_CHARS)
+}
+
+fn modal_preview_line(value: String, color: u32, mono: bool) -> Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_sm()
+        .text_color(rgb(color))
+        .when(mono, |this| this.font_family(FONT_MONO))
+        .child(value)
+}
+
+fn modal_preview_box(theme: ThemePalette, label: &'static str, value: String) -> Div {
+    div()
+        .flex_none()
+        .w_full()
+        .min_w_0()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.panel_bg))
+        .p_2()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme.text_muted))
+                .child(label),
+        )
+        .child(modal_preview_line(value, theme.text_primary, true))
 }
 
 fn preview_managed_worktree_path(

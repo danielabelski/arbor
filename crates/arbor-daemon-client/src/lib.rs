@@ -3,9 +3,9 @@ mod types;
 pub use types::{
     AgentSessionDto, ChangedFileDto, CommitWorktreeRequest, CreateManagedWorktreeRequest,
     CreateTerminalRequest, CreateTerminalResponse, CreateWorktreeRequest, DeleteWorktreeRequest,
-    GitActionResponse, HealthResponse, IssueDto, IssueListResponse, IssueSourceDto,
-    ManagedWorktreePreviewRequest, ManagedWorktreePreviewResponse, PushWorktreeRequest,
-    RepositoryDto, TerminalResizeRequest, TerminalSignalRequest, WorktreeDto,
+    GitActionResponse, HealthResponse, IssueDto, IssueListResponse, IssueReviewDto,
+    IssueReviewKind, IssueSourceDto, ManagedWorktreePreviewRequest, ManagedWorktreePreviewResponse,
+    PushWorktreeRequest, RepositoryDto, TerminalResizeRequest, TerminalSignalRequest, WorktreeDto,
     WorktreeMutationResponse,
 };
 use {
