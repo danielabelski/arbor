@@ -301,6 +301,7 @@ impl ArborWindow {
                     repository_entries_save: PendingSave::default(),
                     daemon_auth_tokens: connection_history::load_tokens(),
                     daemon_auth_tokens_save: PendingSave::default(),
+                    github_auth_state_save: PendingSave::default(),
                     connected_daemon_label: None,
                     daemon_connect_epoch: 0,
                     pending_diff_scroll_to_file: None,
@@ -353,6 +354,7 @@ impl ArborWindow {
                     _connection_history_save_task: None,
                     _repository_entries_save_task: None,
                     _daemon_auth_tokens_save_task: None,
+                    _github_auth_state_save_task: None,
                     _ui_state_save_task: None,
                     _daemon_session_store_save_task: None,
                     _create_modal_preview_task: None,
@@ -671,6 +673,7 @@ impl ArborWindow {
             repository_entries_save: PendingSave::default(),
             daemon_auth_tokens: connection_history::load_tokens(),
             daemon_auth_tokens_save: PendingSave::default(),
+            github_auth_state_save: PendingSave::default(),
             connected_daemon_label: None,
             daemon_connect_epoch: 0,
             pending_diff_scroll_to_file: None,
@@ -695,6 +698,7 @@ impl ArborWindow {
             _connection_history_save_task: None,
             _repository_entries_save_task: None,
             _daemon_auth_tokens_save_task: None,
+            _github_auth_state_save_task: None,
             _ui_state_save_task: None,
             _daemon_session_store_save_task: None,
             _create_modal_preview_task: None,
@@ -1575,6 +1579,7 @@ impl ArborWindow {
             || self.connection_history_save.has_work()
             || self.repository_entries_save.has_work()
             || self.daemon_auth_tokens_save.has_work()
+            || self.github_auth_state_save.has_work()
         {
             return;
         }
@@ -8359,6 +8364,21 @@ mod tests {
             Some((session.rows + 1, session.cols, 0, 0)),
             now
         ));
+    }
+
+    #[test]
+    fn terminal_input_buffers_only_while_session_is_initializing() {
+        let mut session = session_with_styled_line("prompt", 0xffffff, 0x000000, None);
+
+        session.is_initializing = true;
+        assert!(crate::should_queue_terminal_input(&session));
+
+        session.is_initializing = false;
+        assert!(!crate::should_queue_terminal_input(&session));
+
+        session.is_initializing = true;
+        session.runtime = Some(Arc::new(daemon_runtime_for_test()));
+        assert!(!crate::should_queue_terminal_input(&session));
     }
 
     #[test]

@@ -581,6 +581,12 @@ impl ArborWindow {
         self.start_pending_repository_entries_save(cx);
     }
 
+    fn persist_github_auth_state(&mut self, cx: &mut Context<Self>) {
+        self.github_auth_state_save
+            .queue(self.github_auth_state.clone());
+        self.start_pending_github_auth_state_save(cx);
+    }
+
     fn start_pending_repository_entries_save(&mut self, cx: &mut Context<Self>) {
         let Some(entries_to_save) = self.repository_entries_save.begin_next() else {
             self.maybe_finish_quit_after_persistence_flush(cx);
@@ -600,6 +606,31 @@ impl ArborWindow {
                 }
 
                 this.start_pending_repository_entries_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
+            });
+        }));
+    }
+
+    fn start_pending_github_auth_state_save(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.github_auth_state_save.begin_next() else {
+            self.maybe_finish_quit_after_persistence_flush(cx);
+            return;
+        };
+
+        let store = self.github_auth_store.clone();
+        self._github_auth_state_save_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { store.save(&state) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.github_auth_state_save.finish();
+                if let Err(error) = result {
+                    this.notice =
+                        Some(format!("failed to persist GitHub auth state: {error}"));
+                    cx.notify();
+                }
+
+                this.start_pending_github_auth_state_save(cx);
                 this.maybe_finish_quit_after_persistence_flush(cx);
             });
         }));
@@ -712,20 +743,7 @@ impl ArborWindow {
 
                 this.github_auth_state.user_login = Some(login);
                 this.github_auth_state.user_avatar_url = avatar_url;
-                let store = this.github_auth_store.clone();
-                let state = this.github_auth_state.clone();
-                cx.spawn(async move |this, cx| {
-                    let result = cx.background_spawn(async move { store.save(&state) }).await;
-                    let _ = this.update(cx, |this, cx| {
-                        if let Err(error) = result {
-                            this.notice = Some(format!(
-                                "GitHub identity refreshed, but failed to persist auth state: {error}"
-                            ));
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
+                this.persist_github_auth_state(cx);
                 cx.notify();
             });
         })
@@ -746,20 +764,7 @@ impl ArborWindow {
         self.github_auth_state = github_auth_store::GithubAuthState::default();
         self.notice = Some("disconnected from GitHub".to_owned());
         self.refresh_worktree_pull_requests(cx);
-        let store = self.github_auth_store.clone();
-        let state = self.github_auth_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { store.save(&state) }).await;
-            let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.notice = Some(format!(
-                        "disconnected, but failed to persist auth state: {error}"
-                    ));
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        self.persist_github_auth_state(cx);
         cx.notify();
     }
 
@@ -867,20 +872,7 @@ impl ArborWindow {
                             "GitHub connected, pull request numbers will refresh automatically"
                                 .to_owned(),
                         );
-                        let store = this.github_auth_store.clone();
-                        let state = this.github_auth_state.clone();
-                        cx.spawn(async move |this, cx| {
-                            let result = cx.background_spawn(async move { store.save(&state) }).await;
-                            let _ = this.update(cx, |this, cx| {
-                                if let Err(error) = result {
-                                    this.notice = Some(format!(
-                                        "GitHub connected, but failed to persist auth state: {error}"
-                                    ));
-                                }
-                                cx.notify();
-                            });
-                        })
-                        .detach();
+                        this.persist_github_auth_state(cx);
                     },
                     Err(error) => {
                         this.notice = Some(error);

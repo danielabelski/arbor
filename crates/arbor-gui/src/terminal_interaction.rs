@@ -1,3 +1,11 @@
+fn should_queue_terminal_input(session: &TerminalSession) -> bool {
+    session.runtime.is_none() && session.is_initializing
+}
+
+fn terminal_input_unavailable_error(session: &TerminalSession) -> String {
+    format!("terminal `{}` is not available", session.title)
+}
+
 impl ArborWindow {
     fn active_terminal(&self) -> Option<&TerminalSession> {
         let worktree_path = self.selected_worktree_path()?;
@@ -21,9 +29,13 @@ impl ArborWindow {
             return Ok(());
         };
 
-        let Some(runtime) = self.terminals[index].runtime.clone() else {
+        if should_queue_terminal_input(&self.terminals[index]) {
             self.terminals[index].queued_input.extend_from_slice(input);
             return Ok(());
+        }
+
+        let Some(runtime) = self.terminals[index].runtime.clone() else {
+            return Err(terminal_input_unavailable_error(&self.terminals[index]));
         };
 
         {
@@ -43,12 +55,17 @@ impl ArborWindow {
         else {
             return Ok(());
         };
-        let Some(runtime) = self.terminals[index].runtime.clone() else {
-            return Ok(());
-        };
         if self.terminals[index].queued_input.is_empty() {
             return Ok(());
         }
+        if should_queue_terminal_input(&self.terminals[index]) {
+            return Ok(());
+        }
+
+        let Some(runtime) = self.terminals[index].runtime.clone() else {
+            self.terminals[index].queued_input.clear();
+            return Err(terminal_input_unavailable_error(&self.terminals[index]));
+        };
 
         let queued_input = std::mem::take(&mut self.terminals[index].queued_input);
         let session = self.terminals[index].clone();
