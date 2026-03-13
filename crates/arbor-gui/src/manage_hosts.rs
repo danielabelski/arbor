@@ -117,6 +117,7 @@ impl ArborWindow {
             modal.saving = true;
         }
         let store = self.app_config_store.clone();
+        self.begin_background_config_save();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { store.append_remote_host(&host_config) })
@@ -148,6 +149,7 @@ impl ArborWindow {
                         }
                     },
                 }
+                this.finish_background_config_save(cx);
                 cx.notify();
             });
         })
@@ -158,6 +160,7 @@ impl ArborWindow {
     fn remove_host_at(&mut self, host_name: String, cx: &mut Context<Self>) {
         let store = self.app_config_store.clone();
         let host_name_for_save = host_name.clone();
+        self.begin_background_config_save();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { store.remove_remote_host(&host_name_for_save) })
@@ -173,6 +176,7 @@ impl ArborWindow {
                         this.notice = Some(error);
                     },
                 }
+                this.finish_background_config_save(cx);
                 cx.notify();
             });
         })

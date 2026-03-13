@@ -172,6 +172,7 @@ impl ArborWindow {
             })
             .collect();
         let store = self.app_config_store.clone();
+        self.begin_background_config_save();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { store.save_repo_presets(&save_dir, &presets) })
@@ -192,6 +193,7 @@ impl ArborWindow {
                         }
                     },
                 }
+                this.finish_background_config_save(cx);
                 cx.notify();
             });
         })
@@ -217,6 +219,7 @@ impl ArborWindow {
         let save_dir = self.active_arbor_toml_dir();
         let store = self.app_config_store.clone();
         let name_for_delete = name.clone();
+        self.begin_background_config_save();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -239,6 +242,7 @@ impl ArborWindow {
                         }
                     },
                 }
+                this.finish_background_config_save(cx);
                 cx.notify();
             });
         })

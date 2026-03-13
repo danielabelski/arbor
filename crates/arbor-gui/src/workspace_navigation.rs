@@ -1,3 +1,16 @@
+fn worktree_notes_load_is_current(
+    current_selection_epoch: usize,
+    load_selection_epoch: usize,
+    current_path: Option<&Path>,
+    load_path: &Path,
+    current_edit_generation: u64,
+    load_edit_generation: u64,
+) -> bool {
+    current_selection_epoch == load_selection_epoch
+        && current_path == Some(load_path)
+        && current_edit_generation == load_edit_generation
+}
+
 impl ArborWindow {
     fn selected_worktree_path(&self) -> Option<&Path> {
         if let Some(ref arw) = self.active_remote_worktree {
@@ -1482,6 +1495,7 @@ impl ArborWindow {
         self.worktree_notes_lines = vec![String::new()];
         let result_notes_path = notes_path.clone();
         let selection_epoch = self.worktree_selection_epoch;
+        let notes_edit_generation = self.worktree_notes_edit_generation;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -1494,8 +1508,14 @@ impl ArborWindow {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.worktree_selection_epoch != selection_epoch
-                    || this.worktree_notes_path.as_ref() != Some(&result_notes_path)
+                if !worktree_notes_load_is_current(
+                    this.worktree_selection_epoch,
+                    selection_epoch,
+                    this.worktree_notes_path.as_deref(),
+                    result_notes_path.as_path(),
+                    this.worktree_notes_edit_generation,
+                    notes_edit_generation,
+                )
                 {
                     return;
                 }
@@ -1594,6 +1614,7 @@ impl ArborWindow {
             self.worktree_notes_cursor.col += 1;
         }
 
+        self.worktree_notes_edit_generation = self.worktree_notes_edit_generation.wrapping_add(1);
         self.save_selected_worktree_notes(cx);
     }
 
@@ -1619,6 +1640,7 @@ impl ArborWindow {
                 return true;
             },
             "backspace" => {
+                let mut changed = false;
                 if self.worktree_notes_cursor.col > 0 {
                     let line = &mut self.worktree_notes_lines[self.worktree_notes_cursor.line];
                     let byte_pos = char_to_byte_offset(line, self.worktree_notes_cursor.col);
@@ -1626,18 +1648,25 @@ impl ArborWindow {
                         char_to_byte_offset(line, self.worktree_notes_cursor.col.saturating_sub(1));
                     line.replace_range(prev_byte..byte_pos, "");
                     self.worktree_notes_cursor.col -= 1;
+                    changed = true;
                 } else if self.worktree_notes_cursor.line > 0 {
                     let removed = self.worktree_notes_lines.remove(self.worktree_notes_cursor.line);
                     self.worktree_notes_cursor.line -= 1;
                     let previous = &mut self.worktree_notes_lines[self.worktree_notes_cursor.line];
                     self.worktree_notes_cursor.col = previous.chars().count();
                     previous.push_str(&removed);
+                    changed = true;
                 }
-                self.save_selected_worktree_notes(cx);
+                if changed {
+                    self.worktree_notes_edit_generation =
+                        self.worktree_notes_edit_generation.wrapping_add(1);
+                    self.save_selected_worktree_notes(cx);
+                }
                 cx.notify();
                 return true;
             },
             "delete" => {
+                let mut changed = false;
                 let line_len = self.worktree_notes_lines[self.worktree_notes_cursor.line]
                     .chars()
                     .count();
@@ -1646,13 +1675,19 @@ impl ArborWindow {
                     let byte_pos = char_to_byte_offset(line, self.worktree_notes_cursor.col);
                     let next_byte = char_to_byte_offset(line, self.worktree_notes_cursor.col + 1);
                     line.replace_range(byte_pos..next_byte, "");
+                    changed = true;
                 } else if self.worktree_notes_cursor.line + 1 < self.worktree_notes_lines.len() {
                     let next = self
                         .worktree_notes_lines
                         .remove(self.worktree_notes_cursor.line + 1);
                     self.worktree_notes_lines[self.worktree_notes_cursor.line].push_str(&next);
+                    changed = true;
                 }
-                self.save_selected_worktree_notes(cx);
+                if changed {
+                    self.worktree_notes_edit_generation =
+                        self.worktree_notes_edit_generation.wrapping_add(1);
+                    self.save_selected_worktree_notes(cx);
+                }
                 cx.notify();
                 return true;
             },

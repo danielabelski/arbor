@@ -1,4 +1,17 @@
+fn background_config_save_has_work(pending_app_config_save_count: usize) -> bool {
+    pending_app_config_save_count > 0
+}
+
 impl ArborWindow {
+    fn begin_background_config_save(&mut self) {
+        self.pending_app_config_save_count = self.pending_app_config_save_count.saturating_add(1);
+    }
+
+    fn finish_background_config_save(&mut self, cx: &mut Context<Self>) {
+        self.pending_app_config_save_count = self.pending_app_config_save_count.saturating_sub(1);
+        self.maybe_finish_quit_after_persistence_flush(cx);
+    }
+
     fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
         self.settings_modal = Some(SettingsModal {
             active_control: SettingsControl::DaemonBindMode,
@@ -106,6 +119,7 @@ impl ArborWindow {
         let store = self.app_config_store.clone();
         let daemon = self.terminal_daemon.clone();
         let daemon_base_url = self.daemon_base_url.clone();
+        self.begin_background_config_save();
         cx.spawn(async move |this, cx| {
             enum SettingsSaveOutcome {
                 Saved(Option<bool>),
@@ -163,7 +177,10 @@ impl ArborWindow {
                         this.notice = Some("Settings saved".to_owned());
                     },
                     Ok(SettingsSaveOutcome::RestartNeeded) => {
+                        this.config_last_modified = None;
+                        this.settings_modal = None;
                         this.restart_local_daemon_after_settings_save(cx);
+                        this.finish_background_config_save(cx);
                         return;
                     },
                     Err(error) => {
@@ -174,6 +191,7 @@ impl ArborWindow {
                         }
                     },
                 }
+                this.finish_background_config_save(cx);
                 cx.notify();
             });
         })

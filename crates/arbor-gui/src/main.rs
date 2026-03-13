@@ -302,6 +302,7 @@ impl ArborWindow {
                     daemon_auth_tokens: connection_history::load_tokens(),
                     daemon_auth_tokens_save: PendingSave::default(),
                     github_auth_state_save: PendingSave::default(),
+                    pending_app_config_save_count: 0,
                     connected_daemon_label: None,
                     daemon_connect_epoch: 0,
                     pending_diff_scroll_to_file: None,
@@ -335,6 +336,7 @@ impl ArborWindow {
                     worktree_notes_active: false,
                     worktree_notes_error: None,
                     worktree_notes_save_pending: false,
+                    worktree_notes_edit_generation: 0,
                     _worktree_notes_save_task: None,
                     file_tree_entries: Vec::new(),
                     file_tree_loading: false,
@@ -675,6 +677,7 @@ impl ArborWindow {
             daemon_auth_tokens: connection_history::load_tokens(),
             daemon_auth_tokens_save: PendingSave::default(),
             github_auth_state_save: PendingSave::default(),
+            pending_app_config_save_count: 0,
             connected_daemon_label: None,
             daemon_connect_epoch: 0,
             pending_diff_scroll_to_file: None,
@@ -739,6 +742,7 @@ impl ArborWindow {
             worktree_notes_active: false,
             worktree_notes_error: None,
             worktree_notes_save_pending: false,
+            worktree_notes_edit_generation: 0,
             _worktree_notes_save_task: None,
             file_tree_entries: Vec::new(),
             file_tree_loading: false,
@@ -1582,6 +1586,7 @@ impl ArborWindow {
             || self.repository_entries_save.has_work()
             || self.daemon_auth_tokens_save.has_work()
             || self.github_auth_state_save.has_work()
+            || background_config_save_has_work(self.pending_app_config_save_count)
             || ui_state_save_has_work(
                 self.pending_ui_state_save.as_ref(),
                 self.ui_state_save_in_flight,
@@ -8407,6 +8412,35 @@ mod tests {
 
         record.state = Some(daemon::TerminalSessionState::Failed);
         assert!(!crate::orphaned_daemon_session_should_kill(&record));
+    }
+
+    #[test]
+    fn background_config_save_has_work_when_count_is_nonzero() {
+        assert!(!crate::background_config_save_has_work(0));
+        assert!(crate::background_config_save_has_work(1));
+        assert!(crate::background_config_save_has_work(3));
+    }
+
+    #[test]
+    fn worktree_notes_load_is_current_rejects_newer_live_edits() {
+        let path = Path::new("/tmp/repo/.arbor/notes.md");
+
+        assert!(crate::worktree_notes_load_is_current(
+            4,
+            4,
+            Some(path),
+            path,
+            10,
+            10,
+        ));
+        assert!(!crate::worktree_notes_load_is_current(
+            4,
+            4,
+            Some(path),
+            path,
+            11,
+            10,
+        ));
     }
 
     #[test]
