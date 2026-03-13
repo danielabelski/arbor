@@ -3752,12 +3752,23 @@ impl ArborWindow {
                 })
                 .await;
 
-            let _ = this.update(cx, |this, cx| {
+            let orphaned_daemon_session = match &outcome {
+                SpawnTerminalOutcome::Daemon { daemon, record, .. } => {
+                    Some((daemon.clone(), record.clone()))
+                },
+                _ => None,
+            };
+            let orphaned_daemon_session_for_update = orphaned_daemon_session.clone();
+
+            let updated = this.update(cx, |this, cx| {
                 let Some(session) = this
                     .terminals
                     .iter_mut()
                     .find(|session| session.id == session_id)
                 else {
+                    if let Some((daemon, record)) = orphaned_daemon_session_for_update {
+                        schedule_orphaned_daemon_session_cleanup(cx, daemon, record);
+                    }
                     return;
                 };
 
@@ -3876,6 +3887,12 @@ impl ArborWindow {
                 this.sync_daemon_session_store(cx);
                 cx.notify();
             });
+
+            if updated.is_err()
+                && let Some((daemon, record)) = orphaned_daemon_session
+            {
+                schedule_orphaned_daemon_session_cleanup(cx, daemon, record);
+            }
         })
         .detach();
         true
@@ -8371,6 +8388,25 @@ mod tests {
             Some((session.rows + 1, session.cols, 0, 0)),
             now
         ));
+    }
+
+    #[test]
+    fn orphaned_daemon_session_cleanup_kills_only_running_sessions() {
+        let mut record = daemon::DaemonSessionRecord {
+            session_id: "daemon-test-1".into(),
+            workspace_id: "/tmp/worktree".into(),
+            cwd: PathBuf::from("/tmp/worktree"),
+            shell: "zsh".to_owned(),
+            ..Default::default()
+        };
+
+        assert!(crate::orphaned_daemon_session_should_kill(&record));
+
+        record.state = Some(daemon::TerminalSessionState::Completed);
+        assert!(!crate::orphaned_daemon_session_should_kill(&record));
+
+        record.state = Some(daemon::TerminalSessionState::Failed);
+        assert!(!crate::orphaned_daemon_session_should_kill(&record));
     }
 
     #[test]

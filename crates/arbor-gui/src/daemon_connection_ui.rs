@@ -203,12 +203,26 @@ impl ArborWindow {
                     })
                     .await;
 
-                let _ = this.update(cx, |this, cx| {
+                let orphaned_daemon_session = result
+                    .as_ref()
+                    .ok()
+                    .map(|(client, daemon_session)| (client.clone(), daemon_session.clone()));
+                let orphaned_daemon_session_for_update = orphaned_daemon_session.clone();
+
+                let updated = this.update(cx, |this, cx| {
                     let Some(session) = this
                         .terminals
                         .iter_mut()
                         .find(|session| session.id == session_id)
                     else {
+                        if let Some((client, daemon_session)) = orphaned_daemon_session_for_update
+                        {
+                            schedule_orphaned_daemon_session_cleanup(
+                                cx,
+                                client,
+                                daemon_session,
+                            );
+                        }
                         return;
                     };
 
@@ -257,6 +271,12 @@ impl ArborWindow {
                     }
                     cx.notify();
                 });
+
+                if updated.is_err()
+                    && let Some((client, daemon_session)) = orphaned_daemon_session
+                {
+                    schedule_orphaned_daemon_session_cleanup(cx, client, daemon_session);
+                }
             })
             .detach();
         }

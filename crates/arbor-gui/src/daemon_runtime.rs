@@ -598,6 +598,52 @@ fn terminal_state_from_daemon_record(record: &DaemonSessionRecord) -> TerminalSt
     }
 }
 
+fn cleanup_orphaned_daemon_session(
+    daemon: terminal_daemon_http::SharedTerminalDaemonClient,
+    record: DaemonSessionRecord,
+) -> Result<(), String> {
+    let result = if orphaned_daemon_session_should_kill(&record) {
+        daemon.kill(KillRequest {
+            session_id: record.session_id.clone(),
+        })
+    } else {
+        daemon.detach(DetachRequest {
+            session_id: record.session_id.clone(),
+        })
+    };
+
+    result.map_err(|error| {
+        format!(
+            "failed to clean up orphaned daemon session `{}`: {error}",
+            record.session_id
+        )
+    })
+}
+
+fn orphaned_daemon_session_should_kill(record: &DaemonSessionRecord) -> bool {
+    terminal_state_from_daemon_record(record) == TerminalState::Running
+}
+
+fn schedule_orphaned_daemon_session_cleanup<C>(
+    cx: &C,
+    daemon: terminal_daemon_http::SharedTerminalDaemonClient,
+    record: DaemonSessionRecord,
+) where
+    C: gpui::AppContext,
+{
+    let session_id = record.session_id.to_string();
+    cx.background_spawn(async move {
+        if let Err(error) = cleanup_orphaned_daemon_session(daemon, record) {
+            tracing::warn!(
+                session_id = %session_id,
+                %error,
+                "failed to clean up orphaned daemon session"
+            );
+        }
+    })
+    .detach();
+}
+
 fn terminal_output_tail_for_metadata(
     session: &TerminalSession,
     max_lines: usize,
