@@ -1,4 +1,14 @@
 impl ArborWindow {
+    fn repository_for_issue_target(&self, target: &IssueTarget) -> Option<&RepositorySummary> {
+        match target.daemon_target {
+            ManagedDaemonTarget::Primary => self
+                .repositories
+                .iter()
+                .find(|repository| repository.root == Path::new(&target.repo_root)),
+            ManagedDaemonTarget::Remote(_) => None,
+        }
+    }
+
     fn open_create_modal(
         &mut self,
         repo_index: usize,
@@ -58,18 +68,29 @@ impl ArborWindow {
             return;
         };
 
+        let source_label = self
+            .issue_list_state(&target)
+            .and_then(|state| state.source.as_ref())
+            .map(issue_modal_source_label)
+            .unwrap_or_else(|| "Issue".to_owned());
+
+        self.open_issue_create_modal_for_target(target, source_label, issue, cx);
+    }
+
+    fn open_issue_create_modal_for_target(
+        &mut self,
+        target: IssueTarget,
+        source_label: String,
+        issue: terminal_daemon_http::IssueDto,
+        cx: &mut Context<Self>,
+    ) {
         let repository_path = target.repo_root.clone();
         let worktree_name = issue.suggested_worktree_name.clone();
         let clone_url = self
-            .selected_repository()
+            .repository_for_issue_target(&target)
             .and_then(|repository| repository.github_repo_slug.as_ref())
             .map(|slug| format!("git@github.com:{slug}.git"))
             .unwrap_or_default();
-        let source_label = self
-            .issue_source
-            .as_ref()
-            .map(|source| source.label.clone())
-            .unwrap_or_else(|| "Issue".to_owned());
 
         self.create_modal = Some(CreateModal {
             tab: CreateModalTab::LocalWorktree,
@@ -590,7 +611,7 @@ impl ArborWindow {
                                     {
                                         this.active_worktree_index = Some(index);
                                         let _ = this.reload_changed_files();
-                                        if this.ensure_selected_worktree_terminal() {
+                                        if this.ensure_selected_worktree_terminal(cx) {
                                             this.sync_daemon_session_store(cx);
                                         }
                                         this.terminal_scroll_handle.scroll_to_bottom();
@@ -621,7 +642,6 @@ impl ArborWindow {
                                     this.activate_remote_worktree(
                                         index,
                                         created.path,
-                                        created.repo_root,
                                         cx,
                                     );
                                 },
@@ -696,7 +716,7 @@ impl ArborWindow {
                         {
                             this.active_worktree_index = Some(index);
                             let _ = this.reload_changed_files();
-                            if this.ensure_selected_worktree_terminal() {
+                            if this.ensure_selected_worktree_terminal(cx) {
                                 this.sync_daemon_session_store(cx);
                             }
                             this.terminal_scroll_handle.scroll_to_bottom();
@@ -813,7 +833,7 @@ impl ArborWindow {
                         {
                             this.active_worktree_index = Some(index);
                             let _ = this.reload_changed_files();
-                            if this.ensure_selected_worktree_terminal() {
+                            if this.ensure_selected_worktree_terminal(cx) {
                                 this.sync_daemon_session_store(cx);
                             }
                             this.terminal_scroll_handle.scroll_to_bottom();
@@ -1187,6 +1207,7 @@ impl ArborWindow {
         let is_outpost_tab = modal.tab == CreateModalTab::RemoteOutpost;
         let daemon_managed_worktree = modal.daemon_managed_target.is_some();
         let issue_context = modal.issue_context.clone();
+        let github_login = self.branch_prefix_github_login();
 
         // Worktree tab data
         let branch_name = if let Some(preview) = modal.managed_preview.as_ref() {
@@ -1194,7 +1215,11 @@ impl ArborWindow {
         } else if daemon_managed_worktree && modal.managed_preview_loading {
             "Resolving preview…".to_owned()
         } else {
-            self.derive_branch_name_for_repo(Path::new(modal.repository_path.trim()), &modal.worktree_name)
+            derive_branch_name_for_repo_with_login(
+                Path::new(modal.repository_path.trim()),
+                &modal.worktree_name,
+                github_login.as_deref(),
+            )
         };
         let target_path_preview = if let Some(preview) = modal.managed_preview.as_ref() {
             preview.path.clone()
@@ -1224,7 +1249,13 @@ impl ArborWindow {
             review_worktree_name_preview(modal.pr_reference.trim(), modal.worktree_name.trim());
         let review_branch_preview = review_name_preview
             .as_deref()
-            .map(|name| self.derive_branch_name_for_repo(Path::new(modal.repository_path.trim()), name))
+            .map(|name| {
+                derive_branch_name_for_repo_with_login(
+                    Path::new(modal.repository_path.trim()),
+                    name,
+                    github_login.as_deref(),
+                )
+            })
             .unwrap_or_else(|| "Will derive from pull request".to_owned());
         let review_path_preview = review_name_preview
             .as_deref()
@@ -1260,7 +1291,11 @@ impl ArborWindow {
         let selected_host_index = modal.host_index;
         let clone_url_active = modal.outpost_active_field == CreateOutpostField::CloneUrl;
         let outpost_name_active = modal.outpost_active_field == CreateOutpostField::OutpostName;
-        let outpost_branch_preview = self.derive_branch_name_for_repo(&self.repo_root, &modal.outpost_name);
+        let outpost_branch_preview = derive_branch_name_for_repo_with_login(
+            &self.repo_root,
+            &modal.outpost_name,
+            github_login.as_deref(),
+        );
         let outpost_create_disabled = modal.is_creating
             || modal.clone_url.trim().is_empty()
             || modal.outpost_name.trim().is_empty()

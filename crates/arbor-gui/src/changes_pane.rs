@@ -155,39 +155,44 @@ impl ArborWindow {
 
     fn render_issues_content(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
-        let search_lower = self.right_pane_search.to_ascii_lowercase();
-        let filtered_issues: Vec<_> = self
-            .issues
-            .iter()
-            .filter(|issue| {
-                search_lower.is_empty()
-                    || issue.display_id.to_ascii_lowercase().contains(&search_lower)
-                    || issue.title.to_ascii_lowercase().contains(&search_lower)
-                    || issue.state.to_ascii_lowercase().contains(&search_lower)
-                    || issue
-                        .linked_branch
-                        .as_ref()
-                        .is_some_and(|branch| branch.to_ascii_lowercase().contains(&search_lower))
-                    || issue
-                        .linked_review
-                        .as_ref()
-                        .is_some_and(|review| review.label.to_ascii_lowercase().contains(&search_lower))
-            })
-            .cloned()
-            .collect();
-        let source_label = self
-            .issue_source
+        let issue_target = self.issue_target_for_current_selection();
+        let issue_state = issue_target
             .as_ref()
-            .map(|source| {
-                source
-                    .url
-                    .as_deref()
-                    .map(|url| format!("{} · {} · {url}", source.provider, source.label))
-                    .unwrap_or_else(|| {
-                        format!("{} · {} · {}", source.provider, source.label, source.repository)
-                    })
+            .and_then(|target| self.issue_list_state(target));
+        let search_lower = self.right_pane_search.to_ascii_lowercase();
+        let filtered_issues: Vec<_> = issue_state
+            .map(|state| {
+                state
+                    .issues
+                    .iter()
+                    .filter(|issue| issue_matches_search(issue, &search_lower))
+                    .cloned()
+                    .collect()
             })
+            .unwrap_or_default();
+        let issues_loading = issue_state.is_some_and(|state| state.loading);
+        let issues_error = issue_state.and_then(|state| state.error.clone());
+        let issues_notice = issue_state.and_then(|state| state.notice.clone()).or_else(|| {
+            if self.active_outpost_index.is_some() {
+                Some(
+                    "Issues are unavailable for SSH outposts. Select a daemon-backed repository instead."
+                        .to_owned(),
+                )
+            } else if issue_target.is_none() {
+                Some("Select a repository to load issues.".to_owned())
+            } else {
+                None
+            }
+        });
+        let source_label = issue_state
+            .and_then(|state| state.source.as_ref())
+            .map(issue_source_summary)
             .unwrap_or_else(|| "Selected repository".to_owned());
+        let modal_source_label = issue_state
+            .as_ref()
+            .and_then(|state| state.source.as_ref())
+            .map(issue_modal_source_label)
+            .unwrap_or_else(|| "Issue".to_owned());
         let mut issues_body = div()
             .id("issues-scroll")
             .flex_1()
@@ -199,7 +204,7 @@ impl ArborWindow {
             .p_2()
             .gap_2();
 
-        if let Some(error) = self.issues_error.clone() {
+        if let Some(error) = issues_error.clone() {
             issues_body = issues_body.child(
                 div()
                     .rounded_sm()
@@ -214,7 +219,7 @@ impl ArborWindow {
             );
         }
 
-        if let Some(notice) = self.issues_notice.clone() {
+        if let Some(notice) = issues_notice.clone() {
             issues_body = issues_body.child(
                 div()
                     .rounded_sm()
@@ -229,7 +234,7 @@ impl ArborWindow {
             );
         }
 
-        if self.issues_loading && filtered_issues.is_empty() {
+        if issues_loading && filtered_issues.is_empty() {
             issues_body = issues_body.child(
                 div()
                     .py_4()
@@ -238,7 +243,7 @@ impl ArborWindow {
                     .text_color(rgb(theme.text_muted))
                     .child("Loading issues…"),
             );
-        } else if self.issues_error.is_none() && filtered_issues.is_empty() {
+        } else if issues_error.is_none() && issues_notice.is_none() && filtered_issues.is_empty() {
             issues_body = issues_body.child(
                 div()
                     .py_4()
@@ -250,10 +255,14 @@ impl ArborWindow {
         }
 
         for (row_id, issue) in filtered_issues.into_iter().enumerate() {
+            let Some(issue_target) = issue_target.clone() else {
+                continue;
+            };
             let issue_context = issue.clone();
             let updated_at = issue.updated_at.clone().unwrap_or_else(|| "-".to_owned());
             let linked_review = issue.linked_review.clone();
             let linked_branch = issue.linked_branch.clone();
+            let issue_source_label = modal_source_label.clone();
             let issue_status_label = if let Some(review) = linked_review.as_ref() {
                 match review.kind {
                     terminal_daemon_http::IssueReviewKind::PullRequest => "PR exists",
@@ -282,7 +291,12 @@ impl ArborWindow {
                     .flex_col()
                     .gap(px(4.))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_issue_create_modal(issue_context.clone(), cx);
+                        this.open_issue_create_modal_for_target(
+                            issue_target.clone(),
+                            issue_source_label.clone(),
+                            issue_context.clone(),
+                            cx,
+                        );
                     }))
                     .child(
                         div()
@@ -458,18 +472,20 @@ impl ArborWindow {
                         action_button(
                             theme,
                             "issues-refresh",
-                            if self.issues_loading {
+                            if issues_loading {
                                 "Loading…"
                             } else {
                                 "Refresh"
                             },
                             ActionButtonStyle::Secondary,
-                            !self.issues_loading,
+                            issue_target.is_some() && !issues_loading,
                         )
-                        .when(!self.issues_loading, |this| {
-                            this.on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_issues(cx);
-                            }))
+                        .when_some(issue_target.clone(), |this, issue_target| {
+                            this.when(!issues_loading, |this| {
+                                this.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.refresh_issues_for_target(issue_target.clone(), cx);
+                                }))
+                            })
                         }),
                     ),
             )
@@ -599,6 +615,9 @@ impl ArborWindow {
                     .flex_col()
                     .font_family(FONT_MONO)
                     .p_1()
+                    .when_some(self.render_changes_worktree_summary(cx), |this, summary| {
+                        this.child(summary)
+                    })
                     .children(filtered_changes.iter().map(|change| {
                         let is_selected = selected_path
                             .as_ref()
@@ -972,4 +991,31 @@ impl ArborWindow {
                 })),
         )
     }
+}
+
+fn issue_matches_search(issue: &terminal_daemon_http::IssueDto, search_lower: &str) -> bool {
+    search_lower.is_empty()
+        || issue.display_id.to_ascii_lowercase().contains(search_lower)
+        || issue.title.to_ascii_lowercase().contains(search_lower)
+        || issue.state.to_ascii_lowercase().contains(search_lower)
+        || issue
+            .linked_branch
+            .as_ref()
+            .is_some_and(|branch| branch.to_ascii_lowercase().contains(search_lower))
+        || issue
+            .linked_review
+            .as_ref()
+            .is_some_and(|review| review.label.to_ascii_lowercase().contains(search_lower))
+}
+
+fn issue_source_summary(source: &terminal_daemon_http::IssueSourceDto) -> String {
+    source
+        .url
+        .as_deref()
+        .map(|url| format!("{} · {} · {url}", source.provider, source.label))
+        .unwrap_or_else(|| format!("{} · {} · {}", source.provider, source.label, source.repository))
+}
+
+fn issue_modal_source_label(source: &terminal_daemon_http::IssueSourceDto) -> String {
+    source.provider.clone()
 }

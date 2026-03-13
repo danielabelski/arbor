@@ -7,6 +7,7 @@ impl ArborWindow {
             selected_index: 0,
         });
         self.command_palette_scroll_handle.scroll_to_item(0);
+        self.refresh_repo_config_if_changed(cx);
         cx.notify();
     }
 
@@ -135,7 +136,7 @@ impl ArborWindow {
             });
         }
 
-        for task in self.load_all_task_templates() {
+        for task in self.command_palette_task_templates.clone() {
             let agent_label = task
                 .agent
                 .map(|agent| agent.label().to_owned())
@@ -162,8 +163,14 @@ impl ArborWindow {
     }
 
     fn command_palette_issue_items(&self) -> Vec<CommandPaletteItem> {
-        self.issues
-            .iter()
+        let Some(target) = self.issue_target_for_current_selection() else {
+            return Vec::new();
+        };
+
+        self.issue_list_state(&target)
+            .map(|state| state.issues.iter())
+            .into_iter()
+            .flatten()
             .map(|issue| {
                 let mut subtitle_parts = vec![issue.state.clone()];
                 if let Some(review) = issue.linked_review.as_ref() {
@@ -300,8 +307,12 @@ impl ArborWindow {
         }
         self.command_palette_scroll_handle.scroll_to_item(0);
 
-        if !self.command_palette_has_issue_snapshot_for_current_selection() {
-            self.refresh_issues(cx);
+        if let Some(target) = self.issue_target_for_current_selection() {
+            if !self.command_palette_has_issue_snapshot_for_current_selection() {
+                self.ensure_issues_loaded_for_target(target, cx);
+            } else {
+                cx.notify();
+            }
         } else {
             cx.notify();
         }
@@ -312,30 +323,13 @@ impl ArborWindow {
             return false;
         };
 
-        self.issues_target.as_ref() == Some(&target)
-            && !self.issues_loading
-            && (!self.issues.is_empty()
-                || self.issue_source.is_some()
-                || self.issues_notice.is_some()
-                || self.issues_error.is_some())
-    }
-
-    fn dismiss_command_palette_layer(&mut self, cx: &mut Context<Self>) {
-        let Some(modal) = self.command_palette_modal.as_mut() else {
-            return;
-        };
-
-        if modal.scope == CommandPaletteScope::Issues {
-            modal.scope = CommandPaletteScope::Actions;
-            modal.query.clear();
-            modal.query_cursor = 0;
-            modal.selected_index = 0;
-            self.command_palette_scroll_handle.scroll_to_item(0);
-            cx.notify();
-            return;
-        }
-
-        self.close_command_palette(cx);
+        self.issue_list_state(&target).is_some_and(|state| {
+            state.loaded
+                || !state.issues.is_empty()
+                || state.source.is_some()
+                || state.notice.is_some()
+                || state.error.is_some()
+        })
     }
 
     fn remember_command_palette_action(&mut self, item: &CommandPaletteItem) {
@@ -385,7 +379,7 @@ impl ArborWindow {
                 } else {
                     "compact sidebar disabled".to_owned()
                 });
-                self.sync_ui_state_store(window);
+                self.sync_ui_state_store(window, cx);
             },
             CommandPaletteAction::OpenSettings => {
                 self.command_palette_modal = None;
@@ -443,14 +437,6 @@ impl ArborWindow {
         modal.selected_index = next;
         self.command_palette_scroll_handle.scroll_to_item(next);
         cx.notify();
-    }
-
-    fn load_all_task_templates(&self) -> Vec<TaskTemplate> {
-        let mut tasks = Vec::new();
-        for repository in &self.repositories {
-            tasks.extend(load_task_templates_for_repo(&repository.root));
-        }
-        tasks
     }
 
     fn launch_task_template(
@@ -734,16 +720,25 @@ impl ArborWindow {
                     } else {
                         "Select a daemon-backed repository to browse issues.".to_owned()
                     }
-                } else if self.issues_loading {
-                    "Loading issues…".to_owned()
-                } else if let Some(error) = self.issues_error.as_ref() {
-                    error.clone()
-                } else if let Some(notice) = self.issues_notice.as_ref() {
-                    notice.clone()
-                } else if modal.query.trim().is_empty() {
-                    "No issues found for this repository.".to_owned()
                 } else {
-                    "No matching issues.".to_owned()
+                    let Some(target) = self.issue_target_for_current_selection() else {
+                        return "Select a daemon-backed repository to browse issues.".to_owned();
+                    };
+                    let Some(state) = self.issue_list_state(&target) else {
+                        return "Loading issues…".to_owned();
+                    };
+
+                    if state.loading && state.issues.is_empty() {
+                        "Loading issues…".to_owned()
+                    } else if let Some(error) = state.error.as_ref() {
+                        error.clone()
+                    } else if let Some(notice) = state.notice.as_ref() {
+                        notice.clone()
+                    } else if modal.query.trim().is_empty() {
+                        "No issues found for this repository.".to_owned()
+                    } else {
+                        "No matching issues.".to_owned()
+                    }
                 }
             },
         }

@@ -1,9 +1,136 @@
 impl ArborWindow {
+    fn persist_connection_history(&mut self, cx: &mut Context<Self>) {
+        self.connection_history_save
+            .queue(self.connection_history.clone());
+        self.start_pending_connection_history_save(cx);
+    }
+
+    fn record_connection_history_entry(
+        &mut self,
+        address: &str,
+        label: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.connection_history =
+            connection_history::updated_history_entries(&self.connection_history, address, label);
+        self.persist_connection_history(cx);
+    }
+
+    fn persist_daemon_auth_tokens(&mut self, cx: &mut Context<Self>) {
+        self.daemon_auth_tokens_save
+            .queue(self.daemon_auth_tokens.clone());
+        self.start_pending_daemon_auth_tokens_save(cx);
+    }
+
+    fn begin_daemon_connect_attempt(&mut self) -> u64 {
+        let connect_epoch = self.daemon_connect_epoch.wrapping_add(1);
+        self.daemon_connect_epoch = connect_epoch;
+        connect_epoch
+    }
+
+    fn start_pending_connection_history_save(&mut self, cx: &mut Context<Self>) {
+        let Some(history) = self.connection_history_save.begin_next() else {
+            self.maybe_finish_quit_after_persistence_flush(cx);
+            return;
+        };
+
+        self._connection_history_save_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { connection_history::save_history(&history) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.connection_history_save.finish();
+                if let Err(error) = result {
+                    this.notice = Some(format!("failed to persist connection history: {error}"));
+                    cx.notify();
+                }
+
+                this.start_pending_connection_history_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
+            });
+        }));
+    }
+
+    fn start_pending_daemon_auth_tokens_save(&mut self, cx: &mut Context<Self>) {
+        let Some(tokens) = self.daemon_auth_tokens_save.begin_next() else {
+            self.maybe_finish_quit_after_persistence_flush(cx);
+            return;
+        };
+
+        self._daemon_auth_tokens_save_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { connection_history::save_tokens(&tokens) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.daemon_auth_tokens_save.finish();
+                if let Err(error) = result {
+                    this.notice = Some(format!("failed to persist daemon auth tokens: {error}"));
+                    cx.notify();
+                }
+
+                this.start_pending_daemon_auth_tokens_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
+            });
+        }));
+    }
+
+    fn open_remote_create_modal(
+        &mut self,
+        daemon_url: String,
+        hostname: String,
+        repo_root: String,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!(
+            url = %daemon_url,
+            host = %hostname,
+            repo = %repo_root,
+            "opening create modal on remote daemon"
+        );
+        self.record_connection_history_entry(&daemon_url, Some(&hostname), cx);
+        self.pending_remote_create_repo_root = Some(repo_root.clone());
+        self.connect_to_daemon_endpoint(
+            &daemon_url,
+            Some(hostname),
+            None,
+            Some(repo_root),
+            false,
+            None,
+            cx,
+        );
+    }
+
+    fn open_create_modal_for_connected_repo(&mut self, repo_root: &str, cx: &mut Context<Self>) {
+        if let Some(repo_index) = self
+            .repositories
+            .iter()
+            .position(|repository| repository.root.to_string_lossy().ends_with(repo_root))
+        {
+            self.select_repository(repo_index, cx);
+            self.open_create_modal(repo_index, CreateModalTab::LocalWorktree, cx);
+        } else if let Some(repo_index) = self.repositories.first().map(|_| 0) {
+            self.select_repository(repo_index, cx);
+            self.open_create_modal(repo_index, CreateModalTab::LocalWorktree, cx);
+        }
+    }
+
+    fn select_remote_worktree(
+        &mut self,
+        daemon_index: usize,
+        worktree_path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_remote_worktree(daemon_index, worktree_path, cx);
+        self.terminal_scroll_handle.scroll_to_bottom();
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
     fn activate_remote_worktree(
         &mut self,
         daemon_index: usize,
         worktree_path: String,
-        repo_root: String,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.remote_daemon_states.get(&daemon_index) else {
@@ -15,10 +142,15 @@ impl ArborWindow {
         tracing::info!(
             host = %hostname,
             path = %worktree_path,
-            repo = %repo_root,
-            "activating remote worktree (keeping local daemon)"
+            "selecting remote worktree (keeping local daemon)"
         );
 
+        let repo_root = state
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.path == worktree_path)
+            .map(|worktree| worktree.repo_root.clone())
+            .unwrap_or_else(|| worktree_path.clone());
         let cwd = PathBuf::from(&worktree_path);
         self.active_worktree_index = None;
         self.active_outpost_index = None;
@@ -43,7 +175,7 @@ impl ArborWindow {
 
             let shell = self.embedded_shell();
 
-            let mut session = TerminalSession {
+            let session = TerminalSession {
                 id: session_id,
                 daemon_session_id: session_id.to_string(),
                 worktree_path: cwd.clone(),
@@ -65,98 +197,108 @@ impl ArborWindow {
                 cursor: None,
                 modes: TerminalModes::default(),
                 last_runtime_sync_at: None,
+                queued_input: Vec::new(),
+                is_initializing: true,
                 runtime: None,
             };
-
-            match client.create_or_attach(CreateOrAttachRequest {
-                session_id: String::new().into(),
-                workspace_id: cwd.display().to_string().into(),
-                cwd: cwd.clone(),
-                shell,
-                cols: 120,
-                rows: 35,
-                title: Some(session.title.clone()),
-                command: None,
-            }) {
-                Ok(response) => {
-                    let daemon_session = response.session;
-                    session.daemon_session_id = daemon_session.session_id.to_string();
-                    session.title = daemon_session
-                        .title
-                        .clone()
-                        .filter(|value| !value.trim().is_empty())
-                        .unwrap_or(session.title);
-                    session.last_command = daemon_session.last_command.clone();
-                    session.command = daemon_session.shell.clone();
-                    session.output = daemon_session.output_tail.clone().unwrap_or_default();
-                    session.state = terminal_state_from_daemon_record(&daemon_session);
-                    session.exit_code = daemon_session.exit_code;
-                    session.updated_at_unix_ms = daemon_session.updated_at_unix_ms;
-                    session.root_pid = daemon_session.root_pid;
-                    session.cols = daemon_session.cols.max(2);
-                    session.rows = daemon_session.rows.max(1);
-                    session.runtime = Some(local_daemon_runtime(
-                        client,
-                        daemon_session.session_id.to_string(),
-                        Some(self.terminal_poll_tx.clone()),
-                    ));
-                },
-                Err(error) => {
-                    tracing::warn!(%error, "failed to create remote terminal session");
-                    self.notice = Some(format!("failed to create terminal on {hostname}: {error}"));
-                },
-            }
-
             self.terminals.push(session);
+            let poll_tx = self.terminal_poll_tx.clone();
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move {
+                        client
+                            .create_or_attach(CreateOrAttachRequest {
+                                session_id: String::new().into(),
+                                workspace_id: cwd.display().to_string().into(),
+                                cwd: cwd.clone(),
+                                shell,
+                                cols: 120,
+                                rows: 35,
+                                title: Some(format!("term-{session_id}")),
+                                command: None,
+                            })
+                            .map(|response| (client, response.session))
+                            .map_err(|error| error.to_string())
+                    })
+                    .await;
+
+                let orphaned_daemon_session = result
+                    .as_ref()
+                    .ok()
+                    .map(|(client, daemon_session)| (client.clone(), daemon_session.clone()));
+                let orphaned_daemon_session_for_update = orphaned_daemon_session.clone();
+
+                let updated = this.update(cx, |this, cx| {
+                    let Some(session) = this
+                        .terminals
+                        .iter_mut()
+                        .find(|session| session.id == session_id)
+                    else {
+                        if let Some((client, daemon_session)) = orphaned_daemon_session_for_update
+                        {
+                            schedule_orphaned_daemon_session_cleanup(
+                                cx,
+                                client,
+                                daemon_session,
+                            );
+                        }
+                        return;
+                    };
+
+                    match result {
+                        Ok((client, daemon_session)) => {
+                            session.daemon_session_id = daemon_session.session_id.to_string();
+                            session.title = daemon_session
+                                .title
+                                .clone()
+                                .filter(|value| !value.trim().is_empty())
+                                .unwrap_or_else(|| session.title.clone());
+                            session.last_command = daemon_session.last_command.clone();
+                            session.command = daemon_session.shell.clone();
+                            session.output =
+                                daemon_session.output_tail.clone().unwrap_or_default();
+                            session.state = terminal_state_from_daemon_record(&daemon_session);
+                            session.exit_code = daemon_session.exit_code;
+                            session.updated_at_unix_ms = daemon_session.updated_at_unix_ms;
+                            session.root_pid = daemon_session.root_pid;
+                            session.cols = daemon_session.cols.max(2);
+                            session.rows = daemon_session.rows.max(1);
+                            session.runtime = Some(local_daemon_runtime(
+                                client,
+                                daemon_session.session_id.to_string(),
+                                session.rows,
+                                session.cols,
+                                Some(poll_tx.clone()),
+                            ));
+                            session.is_initializing = false;
+                            if let Err(error) =
+                                this.flush_queued_input_for_terminal(session_id)
+                            {
+                                this.notice = Some(format!(
+                                    "failed to write queued terminal input: {error}"
+                                ));
+                            }
+                        },
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to create remote terminal session");
+                            session.is_initializing = false;
+                            session.state = TerminalState::Failed;
+                            session.output = error.clone();
+                            this.notice =
+                                Some(format!("failed to create terminal on {hostname}: {error}"));
+                        },
+                    }
+                    cx.notify();
+                });
+
+                if updated.is_err()
+                    && let Some((client, daemon_session)) = orphaned_daemon_session
+                {
+                    schedule_orphaned_daemon_session_cleanup(cx, client, daemon_session);
+                }
+            })
+            .detach();
         }
-
-        self.sync_issue_target(cx);
-        self.terminal_scroll_handle.scroll_to_bottom();
-        cx.notify();
-    }
-
-    fn open_remote_create_modal(
-        &mut self,
-        daemon_url: String,
-        hostname: String,
-        repo_root: String,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::info!(
-            url = %daemon_url,
-            host = %hostname,
-            repo = %repo_root,
-            "opening create modal on remote daemon"
-        );
-        connection_history::record_connection(&daemon_url, Some(&hostname));
-        self.connection_history = connection_history::load_history();
-        let connected = self.connect_to_daemon_endpoint(&daemon_url, Some(hostname), None, cx);
-        if connected {
-            if let Some(repo_index) = self
-                .repositories
-                .iter()
-                .position(|repository| repository.root.to_string_lossy().ends_with(&repo_root))
-            {
-                self.select_repository(repo_index, cx);
-                self.open_create_modal(repo_index, CreateModalTab::LocalWorktree, cx);
-            } else if let Some(repo_index) = self.repositories.first().map(|_| 0) {
-                self.select_repository(repo_index, cx);
-                self.open_create_modal(repo_index, CreateModalTab::LocalWorktree, cx);
-            }
-        }
-    }
-
-    fn select_remote_worktree(
-        &mut self,
-        daemon_index: usize,
-        worktree_path: String,
-        repo_root: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_remote_worktree(daemon_index, worktree_path, repo_root, cx);
-        window.focus(&self.terminal_focus);
-        cx.notify();
     }
 
     fn toggle_discovered_daemon(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -183,8 +325,9 @@ impl ArborWindow {
         let url = daemon.base_url();
         let hostname = daemon.display_name().to_owned();
 
-        let client = match terminal_daemon_http::default_terminal_daemon_client(&url) {
-            Ok(client) => client,
+        let client: terminal_daemon_http::SharedTerminalDaemonClient =
+            match terminal_daemon_http::HttpTerminalDaemon::new(&url) {
+            Ok(client) => Arc::new(client),
             Err(error) => {
                 tracing::error!(%error, %url, "failed to create HTTP client for LAN daemon");
                 return;
@@ -211,20 +354,22 @@ impl ArborWindow {
         let client_clone = Arc::clone(&client);
         let url_clone = url.clone();
         cx.spawn(async move |this, cx| {
-            let (repositories, worktrees, error, needs_auth) = {
-                let repositories = client_clone.list_repositories();
-                let worktrees = client_clone.list_worktrees();
-                match (repositories, worktrees) {
-                    (Ok(repositories), Ok(worktrees)) => {
-                        (repositories, worktrees, None, false)
-                    },
-                    (Err(error), _) | (_, Err(error)) => {
-                        let needs_auth = error.is_unauthorized();
-                        tracing::warn!(%error, needs_auth, "failed to fetch from LAN daemon");
-                        (Vec::new(), Vec::new(), Some(format!("{error}")), needs_auth)
-                    },
-                }
-            };
+            let (repositories, worktrees, error, needs_auth) = cx
+                .background_spawn(async move {
+                    let repositories = client_clone.list_repositories();
+                    let worktrees = client_clone.list_worktrees();
+                    match (repositories, worktrees) {
+                        (Ok(repositories), Ok(worktrees)) => {
+                            (repositories, worktrees, None, false)
+                        },
+                        (Err(error), _) | (_, Err(error)) => {
+                            let needs_auth = error.is_unauthorized();
+                            tracing::warn!(%error, needs_auth, "failed to fetch from LAN daemon");
+                            (Vec::new(), Vec::new(), Some(format!("{error}")), needs_auth)
+                        },
+                    }
+                })
+                .await;
 
             let _ = cx.update(|cx| {
                 this.update(cx, |this, cx| {
@@ -257,37 +402,57 @@ impl ArborWindow {
         auth_key: String,
         cx: &mut Context<Self>,
     ) {
+        let connect_epoch = self.begin_daemon_connect_attempt();
         self.stop_active_ssh_daemon_tunnel();
-
-        let tunnel = match SshDaemonTunnel::start(&target) {
-            Ok(tunnel) => tunnel,
-            Err(error) => {
-                self.notice = Some(error);
-                self.terminal_daemon = None;
-                self.connected_daemon_label = None;
-                cx.notify();
-                return;
-            },
-        };
-
-        let local_url = tunnel.local_url();
-        let local_port = tunnel.local_port;
-        tracing::info!(
-            remote = %target.ssh_destination(),
-            ssh_port = target.ssh_port,
-            daemon_port = target.daemon_port,
-            local_url = %local_url,
-            "connecting to daemon through ssh tunnel"
-        );
-
-        self.ssh_daemon_tunnel = Some(tunnel);
+        let ssh_destination = target.ssh_destination();
+        let ssh_port = target.ssh_port;
+        let daemon_port = target.daemon_port;
         self.notice = Some(format!(
             "connecting to {} via SSH tunnel\u{2026}",
-            target.ssh_destination()
+            ssh_destination
         ));
         cx.notify();
 
         cx.spawn(async move |this, cx| {
+            let tunnel_result = cx
+                .background_spawn(async move { SshDaemonTunnel::start(&target) })
+                .await;
+
+            let Some((local_url, local_port)) = this
+                .update(cx, |this, cx| {
+                    if this.daemon_connect_epoch != connect_epoch {
+                        return None;
+                    }
+
+                    match tunnel_result {
+                        Ok(tunnel) => {
+                        let local_url = tunnel.local_url();
+                        let local_port = tunnel.local_port;
+                        tracing::info!(
+                            remote = %ssh_destination,
+                            ssh_port = ssh_port,
+                            daemon_port = daemon_port,
+                            local_url = %local_url,
+                            "connecting to daemon through ssh tunnel"
+                        );
+                        this.ssh_daemon_tunnel = Some(tunnel);
+                        Some((local_url, local_port))
+                        },
+                        Err(error) => {
+                            this.notice = Some(error);
+                            this.terminal_daemon = None;
+                            this.connected_daemon_label = None;
+                            cx.notify();
+                            None
+                        },
+                    }
+                })
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
+
             let ready = cx
                 .background_spawn(async move {
                     for _ in 0..40 {
@@ -301,13 +466,21 @@ impl ArborWindow {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
+                if this.daemon_connect_epoch != connect_epoch {
+                    return;
+                }
+
                 this.notice = None;
                 if ready {
-                    let connected =
-                        this.connect_to_daemon_endpoint(&local_url, label, Some(auth_key), cx);
-                    if !connected {
-                        this.stop_active_ssh_daemon_tunnel();
-                    }
+                    this.connect_to_daemon_endpoint(
+                        &local_url,
+                        label,
+                        Some(auth_key),
+                        None,
+                        true,
+                        Some(connect_epoch),
+                        cx,
+                    );
                 } else {
                     tracing::warn!(
                         local_port = local_port,
@@ -328,8 +501,16 @@ impl ArborWindow {
         url: &str,
         label: Option<String>,
         auth_key: Option<String>,
+        open_create_repo_root: Option<String>,
+        stop_tunnel_on_failure: bool,
+        connect_epoch: Option<u64>,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) {
+        let connect_epoch = connect_epoch.unwrap_or_else(|| self.begin_daemon_connect_attempt());
+        if self.daemon_connect_epoch != connect_epoch {
+            return;
+        }
+
         tracing::info!(url = %url, "connecting to daemon");
         self.daemon_base_url = url.to_owned();
         let token_key = auth_key.unwrap_or_else(|| url.to_owned());
@@ -341,7 +522,7 @@ impl ArborWindow {
                 self.terminal_daemon = None;
                 self.connected_daemon_label = None;
                 cx.notify();
-                return false;
+                return;
             },
         };
 
@@ -349,47 +530,71 @@ impl ArborWindow {
             client.set_auth_token(Some(token.clone()));
         }
 
-        match client.list_sessions() {
-            Ok(records) => {
-                self.terminal_daemon = Some(client);
-                self.connected_daemon_label = label;
-                self.restore_terminal_sessions_from_records(records, true);
-                self.refresh_worktrees(cx);
-                cx.notify();
-                true
-            },
-            Err(error) => {
-                if error.is_forbidden() {
-                    tracing::warn!(url = %url, "daemon rejected connection: forbidden (no auth token configured on remote)");
-                    self.notice = Some(
-                        "Remote host has no auth token configured. Set [daemon] auth_token in ~/.config/arbor/config.toml on the remote host.".to_owned(),
-                    );
-                    self.terminal_daemon = None;
-                    self.connected_daemon_label = None;
-                    cx.notify();
-                    false
-                } else if error.is_unauthorized() {
-                    tracing::info!(url = %url, "daemon requires authentication, showing auth modal");
-                    self.daemon_auth_modal = Some(DaemonAuthModal {
-                        daemon_url: token_key,
-                        token: String::new(),
-                        token_cursor: 0,
-                        error: None,
-                    });
-                    self.terminal_daemon = Some(client);
-                    self.connected_daemon_label = label;
-                    cx.notify();
-                    true
-                } else {
-                    tracing::warn!(url = %url, %error, "failed to connect to daemon");
-                    self.notice = Some(format!("failed to connect to {url}: {error}"));
-                    self.terminal_daemon = None;
-                    self.connected_daemon_label = None;
-                    cx.notify();
-                    false
+        let url = url.to_owned();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let client_for_error = client.clone();
+                    client
+                        .list_sessions()
+                        .map(|records| (client, records))
+                        .map_err(|error| (client_for_error, error.to_string()))
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                if this.daemon_connect_epoch != connect_epoch {
+                    return;
                 }
-            },
-        }
+
+                match result {
+                    Ok((client, records)) => {
+                        this.terminal_daemon = Some(client);
+                        this.connected_daemon_label = label;
+                        this.restore_terminal_sessions_from_records(records, true);
+                        this.refresh_worktrees(cx);
+                        if let Some(repo_root) = open_create_repo_root.as_deref() {
+                            this.open_create_modal_for_connected_repo(repo_root, cx);
+                            this.pending_remote_create_repo_root = None;
+                        }
+                    },
+                    Err((client, error)) => {
+                        if error.contains("status 403") {
+                            tracing::warn!(url = %url, "daemon rejected connection: forbidden (no auth token configured on remote)");
+                            this.notice = Some(
+                                "Remote host has no auth token configured. Set [daemon] auth_token in ~/.config/arbor/config.toml on the remote host.".to_owned(),
+                            );
+                            this.terminal_daemon = None;
+                            this.connected_daemon_label = None;
+                            if stop_tunnel_on_failure {
+                                this.stop_active_ssh_daemon_tunnel();
+                            }
+                        } else if error.contains("status 401") {
+                            tracing::info!(url = %url, "daemon requires authentication, showing auth modal");
+                            this.daemon_auth_modal = Some(DaemonAuthModal {
+                                daemon_url: token_key,
+                                token: String::new(),
+                                token_cursor: 0,
+                                error: None,
+                            });
+                            this.terminal_daemon = Some(client);
+                            this.connected_daemon_label = label;
+                            this.pending_remote_create_repo_root = open_create_repo_root;
+                        } else {
+                            tracing::warn!(url = %url, %error, "failed to connect to daemon");
+                            this.notice = Some(format!("failed to connect to {url}: {error}"));
+                            this.terminal_daemon = None;
+                            this.connected_daemon_label = None;
+                            if stop_tunnel_on_failure {
+                                this.stop_active_ssh_daemon_tunnel();
+                            }
+                        }
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn try_start_and_connect_daemon(&mut self, cx: &mut Context<Self>) {
@@ -399,18 +604,39 @@ impl ArborWindow {
                 .background_spawn(async move { try_auto_start_daemon(&daemon_base_url) })
                 .await;
 
-            let _ = this.update(cx, |this, cx| {
-                if let Some(client) = result {
-                    let records = client.list_sessions().unwrap_or_default();
-                    this.terminal_daemon = Some(client);
-                    this.restore_terminal_sessions_from_records(records, true);
-                    this.refresh_worktrees(cx);
-                } else {
-                    this.notice =
-                        Some("Failed to start daemon. Is arbor-httpd available?".to_owned());
-                }
-                cx.notify();
-            });
+            match result {
+                Some(client) => {
+                    let list_result = cx
+                        .background_spawn(async move {
+                            client
+                                .list_sessions()
+                                .map(|records| (client, records))
+                                .map_err(|error| error.to_string())
+                        })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        match list_result {
+                            Ok((client, records)) => {
+                                this.terminal_daemon = Some(client);
+                                this.restore_terminal_sessions_from_records(records, true);
+                                this.refresh_worktrees(cx);
+                            },
+                            Err(error) => {
+                                this.notice =
+                                    Some(format!("Failed to start daemon cleanly: {error}"));
+                            },
+                        }
+                        cx.notify();
+                    });
+                },
+                None => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.notice =
+                            Some("Failed to start daemon. Is arbor-httpd available?".to_owned());
+                        cx.notify();
+                    });
+                },
+            }
         })
         .detach();
     }
@@ -437,7 +663,7 @@ impl ArborWindow {
 
         if let Some(daemon_index) = self.pending_remote_daemon_auth.take() {
             self.daemon_auth_tokens.insert(url.clone(), token.clone());
-            connection_history::save_tokens(&self.daemon_auth_tokens);
+            self.persist_daemon_auth_tokens(cx);
             if let Some(state) = self.remote_daemon_states.get(&daemon_index) {
                 state.client.set_auth_token(Some(token));
             }
@@ -449,27 +675,46 @@ impl ArborWindow {
         if let Some(client) = self.terminal_daemon.as_ref() {
             client.set_auth_token(Some(token.clone()));
         }
-        if let Some(client) = self.terminal_daemon.as_ref() {
-            match client.list_sessions() {
-                Ok(records) => {
-                    self.daemon_auth_tokens.insert(url, token);
-                    connection_history::save_tokens(&self.daemon_auth_tokens);
-                    self.restore_terminal_sessions_from_records(records, true);
-                    self.refresh_worktrees(cx);
-                },
-                Err(error) => {
-                    if error.is_unauthorized() || error.is_forbidden() {
-                        self.daemon_auth_modal = Some(DaemonAuthModal {
-                            daemon_url: modal.daemon_url,
-                            token_cursor: char_count(&modal.token),
-                            token: modal.token,
-                            error: Some("Invalid token".to_owned()),
-                        });
-                    } else {
-                        self.notice = Some(format!("connection failed: {error}"));
+        if let Some(client) = self.terminal_daemon.clone() {
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move {
+                        client
+                            .list_sessions()
+                            .map(|records| (client, records))
+                            .map_err(|error| error.to_string())
+                    })
+                    .await;
+
+                let _ = this.update(cx, |this, cx| {
+                    match result {
+                        Ok((_client, records)) => {
+                            this.daemon_auth_tokens.insert(url, token);
+                            this.persist_daemon_auth_tokens(cx);
+                            this.restore_terminal_sessions_from_records(records, true);
+                            this.refresh_worktrees(cx);
+                            if let Some(repo_root) = this.pending_remote_create_repo_root.take() {
+                                this.open_create_modal_for_connected_repo(&repo_root, cx);
+                            }
+                        },
+                        Err(error) => {
+                            if error.contains("status 401") || error.contains("status 403") {
+                                this.daemon_auth_modal = Some(DaemonAuthModal {
+                                    daemon_url: modal.daemon_url,
+                                    token_cursor: char_count(&modal.token),
+                                    token: modal.token,
+                                    error: Some("Invalid token".to_owned()),
+                                });
+                            } else {
+                                this.notice = Some(format!("connection failed: {error}"));
+                            }
+                        },
                     }
-                },
-            }
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
         }
         cx.notify();
     }
@@ -503,12 +748,19 @@ impl ArborWindow {
             },
         };
         let label = address.clone();
-        connection_history::record_connection(&address, None);
-        self.connection_history = connection_history::load_history();
+        self.record_connection_history_entry(&address, None, cx);
         match target {
             ConnectHostTarget::Http { url, auth_key } => {
                 self.stop_active_ssh_daemon_tunnel();
-                let _ = self.connect_to_daemon_endpoint(&url, Some(label), Some(auth_key), cx);
+                self.connect_to_daemon_endpoint(
+                    &url,
+                    Some(label),
+                    Some(auth_key),
+                    None,
+                    false,
+                    None,
+                    cx,
+                );
             },
             ConnectHostTarget::Ssh { target, auth_key } => {
                 self.connect_to_ssh_daemon(target, Some(label), auth_key, cx);
@@ -902,14 +1154,15 @@ impl ArborWindow {
                                                         .text_color(rgb(theme.text_primary))
                                                 })
                                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                                    connection_history::remove_entry(&remove_addr);
+                                                    this.connection_history =
+                                                        connection_history::history_without_address(
+                                                            &this.connection_history,
+                                                            &remove_addr,
+                                                        );
                                                     this.daemon_auth_tokens
                                                         .retain(|key, _| !key.contains(&*remove_addr));
-                                                    connection_history::save_tokens(
-                                                        &this.daemon_auth_tokens,
-                                                    );
-                                                    this.connection_history =
-                                                        connection_history::load_history();
+                                                    this.persist_connection_history(cx);
+                                                    this.persist_daemon_auth_tokens(cx);
                                                     cx.stop_propagation();
                                                     cx.notify();
                                                 }))

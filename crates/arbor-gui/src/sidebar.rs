@@ -224,6 +224,14 @@ impl ArborWindow {
                                 .enumerate()
                                 .filter(|(_, outpost)| outpost.repo_root == repository.root)
                                 .collect();
+                            let repository_sidebar_tab =
+                                self.repository_sidebar_tab_for_group(&repository.group_key);
+                            let repository_issue_target =
+                                self.issue_target_for_repository(&repository);
+                            let repository_group_key = repository.group_key.clone();
+                            let chevron_repository_group_key = repository_group_key.clone();
+                            let chevron_repository_issue_target =
+                                repository_issue_target.clone();
 
                             div()
                                 .id(("repository-group", repository_index))
@@ -386,15 +394,28 @@ impl ArborWindow {
                                                                 })
                                                                 .on_click(cx.listener(
                                                                     move |this, _, _, cx| {
-                                                                        if this
+                                                                        let was_collapsed = this
                                                                             .collapsed_repositories
-                                                                            .contains(&repository_index)
-                                                                        {
+                                                                            .contains(&repository_index);
+                                                                        if was_collapsed {
                                                                             this.collapsed_repositories
                                                                                 .remove(&repository_index);
                                                                         } else {
                                                                             this.collapsed_repositories
                                                                                 .insert(repository_index);
+                                                                        }
+                                                                        if was_collapsed
+                                                                            && this
+                                                                                .repository_sidebar_tab_for_group(
+                                                                                    &chevron_repository_group_key,
+                                                                                )
+                                                                                == RepositorySidebarTab::Issues
+                                                                        {
+                                                                            this.ensure_issues_loaded_for_target(
+                                                                                chevron_repository_issue_target
+                                                                                    .clone(),
+                                                                                cx,
+                                                                            );
                                                                         }
                                                                         cx.stop_propagation();
                                                                         cx.notify();
@@ -467,17 +488,30 @@ impl ArborWindow {
                                 .when(!is_collapsed, |this| {
                                     let selection_epoch = self.worktree_selection_epoch;
                                     let compact_sidebar = self.compact_sidebar;
-                                    this.child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(6.))
-                                        .children(
-                                            repo_worktrees.into_iter().map(|(index, worktree)| {
+                                    this.child(self.render_repository_sidebar_subtabs(
+                                        repository_index,
+                                        repository_group_key.clone(),
+                                        repository_sidebar_tab,
+                                        repository_issue_target.clone(),
+                                        cx,
+                                    ))
+                                    .when(
+                                        repository_sidebar_tab == RepositorySidebarTab::Worktrees,
+                                        |this| {
+                                            this.child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(6.))
+                                                    .children(
+                                                        repo_worktrees.into_iter().map(|(index, worktree)| {
                                                 let is_active =
                                                     self.active_worktree_index == Some(index);
                                                 let diff_summary = worktree.diff_summary;
-                                                let pr_loading = worktree.pr_loading;
+                                                let show_pr_loading_indicator =
+                                                    should_show_worktree_pr_loading_indicator(
+                                                        &worktree,
+                                                    );
                                                 let pr_number = worktree.pr_number;
                                                 let pr_url = worktree.pr_url.clone();
                                                 let is_merged_pr = worktree
@@ -584,9 +618,22 @@ impl ArborWindow {
                                                             .flex()
                                                             .items_center()
                                                             .justify_center()
-                                                            .text_size(px(16.))
-                                                            .text_color(rgb(theme.text_muted))
-                                                            .child(worktree.checkout_kind.icon()),
+                                                            .child(if show_pr_loading_indicator {
+                                                                div()
+                                                                    .text_xs()
+                                                                    .font_weight(
+                                                                        FontWeight::SEMIBOLD,
+                                                                    )
+                                                                    .text_color(rgb(theme.accent))
+                                                                    .child(loading_spinner_frame(
+                                                                        self.loading_animation_frame,
+                                                                    ))
+                                                            } else {
+                                                                div()
+                                                                    .text_size(px(16.))
+                                                                    .text_color(rgb(theme.text_muted))
+                                                                    .child(worktree.checkout_kind.icon())
+                                                            }),
                                                     )
                                                     // Two-line text column
                                                     .child(
@@ -662,19 +709,6 @@ impl ArborWindow {
                                                                             .text_color(rgb(attention.color))
                                                                             .child(attention.short_label),
                                                                     );
-                                                                }
-
-                                                                if compact_sidebar && pr_loading {
-                                                                        right = right.child(loading_badge(
-                                                                            theme,
-                                                                            format!(
-                                                                                "{} PR…",
-                                                                                loading_spinner_frame(
-                                                                                    self
-                                                                                        .loading_animation_frame,
-                                                                                )
-                                                                            ),
-                                                                        ));
                                                                 }
 
                                                                 if self.worktree_stats_loading
@@ -798,29 +832,16 @@ impl ArborWindow {
                                                                         }
                                                                     }),
                                                             )
-                                                            .when(pr_loading, |this| {
-                                                                this.child(loading_badge(
-                                                                    theme,
-                                                                    format!(
-                                                                        "{} PR…",
-                                                                        loading_spinner_frame(
-                                                                            self
-                                                                                .loading_animation_frame,
-                                                                        )
-                                                                    ),
-                                                                ))
-                                                            })
                                                             .when_some(pr_details.clone(), |this, pr| {
                                                                 let (checks_icon, checks_color) = match pr.checks_status {
                                                                     github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
                                                                     github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
                                                                     github_service::CheckStatus::Pending => ("\u{f192}", 0xe5c07b_u32),
                                                                 };
-                                                                let (review_icon, review_color) = match pr.review_decision {
-                                                                    github_service::ReviewDecision::Approved => ("\u{f00c}", 0x72d69c_u32),
-                                                                    github_service::ReviewDecision::ChangesRequested => ("\u{f071}", 0xeb6f92_u32),
-                                                                    github_service::ReviewDecision::Pending => ("\u{f128}", theme.text_disabled),
-                                                                };
+                                                                let (review_icon, _, review_color) =
+                                                                    review_status_presentation(
+                                                                        pr.review_decision,
+                                                                    );
 
                                                                 let mut badges = this.child(
                                                                     div()
@@ -967,16 +988,15 @@ impl ArborWindow {
                                                 }
                                             }),
                                         ),
-                                )
-                                })
-                                .when(!repo_outposts.is_empty(), |group| {
-                                    group.child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .children(
-                                                repo_outposts.into_iter().map(|(outpost_index, outpost)| {
+                                            )
+                                            .when(!repo_outposts.is_empty(), |group| {
+                                                group.child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_1()
+                                                        .children(
+                                                            repo_outposts.into_iter().map(|(outpost_index, outpost)| {
                                                     let is_active = self.active_outpost_index == Some(outpost_index);
                                                     let status_color = match outpost.status {
                                                         arbor_core::outpost::OutpostStatus::Available => theme.accent,
@@ -1076,7 +1096,20 @@ impl ArborWindow {
                                                         )
                                                         )
                                                 }),
-                                            ),
+                                                        ),
+                                                )
+                                            })
+                                        },
+                                    )
+                                    .when(
+                                        repository_sidebar_tab == RepositorySidebarTab::Issues,
+                                        |this| {
+                                            this.child(self.render_repository_issue_sidebar(
+                                                repository_index,
+                                                repository_issue_target.clone(),
+                                                cx,
+                                            ))
+                                        },
                                     )
                                 })
                         },
@@ -1151,7 +1184,6 @@ impl ArborWindow {
                                 let mut wt_rows: Vec<AnyElement> = Vec::new();
                                 for wt in &repo_wts {
                                     let branch = wt.branch.clone();
-                                    let click_repo_root = wt.repo_root.clone();
                                     let dir_label = wt.path.rsplit('/').next()
                                         .unwrap_or(&wt.path).to_owned();
                                     let additions = wt.diff_additions.unwrap_or(0);
@@ -1179,7 +1211,6 @@ impl ArborWindow {
                                                     this.select_remote_worktree(
                                                         daemon_index,
                                                         click_path.clone(),
-                                                        click_repo_root.clone(),
                                                         window,
                                                         cx,
                                                     );
@@ -1637,6 +1668,342 @@ impl ArborWindow {
                             ),
                     ),
             )
+    }
+
+    fn repository_sidebar_tab_for_group(&self, group_key: &str) -> RepositorySidebarTab {
+        self.repository_sidebar_tabs
+            .get(group_key)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn set_repository_sidebar_tab_for_group(
+        &mut self,
+        group_key: &str,
+        tab: RepositorySidebarTab,
+        cx: &mut Context<Self>,
+    ) {
+        if tab == RepositorySidebarTab::Worktrees {
+            self.repository_sidebar_tabs.remove(group_key);
+        } else {
+            self.repository_sidebar_tabs
+                .insert(group_key.to_owned(), tab);
+        }
+        self.sync_repository_sidebar_tabs_store(cx);
+    }
+
+    fn render_repository_sidebar_subtabs(
+        &self,
+        repository_index: usize,
+        repository_group_key: String,
+        active_tab: RepositorySidebarTab,
+        issue_target: IssueTarget,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = self.theme();
+        let tab_button = |label: &'static str, tab: RepositorySidebarTab| {
+            let is_active = active_tab == tab;
+            let group_key = repository_group_key.clone();
+            let issue_target = issue_target.clone();
+            div()
+                .id(ElementId::Name(
+                    format!(
+                        "repository-sidebar-tab-{repository_index}-{}",
+                        label.to_ascii_lowercase()
+                    )
+                    .into(),
+                ))
+                .flex_1()
+                .h(px(24.))
+                .rounded_sm()
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .bg(rgb(if is_active {
+                    theme.panel_active_bg
+                } else {
+                    theme.panel_bg
+                }))
+                .text_color(rgb(if is_active {
+                    theme.text_primary
+                } else {
+                    theme.text_muted
+                }))
+                .border_1()
+                .border_color(rgb(if is_active {
+                    theme.accent
+                } else {
+                    theme.border
+                }))
+                .hover(|this| this.text_color(rgb(theme.text_primary)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.active_repository_index != Some(repository_index) {
+                        this.select_repository(repository_index, cx);
+                    }
+                    this.set_repository_sidebar_tab_for_group(&group_key, tab, cx);
+                    if tab == RepositorySidebarTab::Issues {
+                        this.ensure_issues_loaded_for_target(issue_target.clone(), cx);
+                    } else {
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }))
+                .child(label)
+        };
+
+        div()
+            .pl(px(22.))
+            .pr_1()
+            .flex()
+            .gap_1()
+            .child(tab_button("Worktrees", RepositorySidebarTab::Worktrees))
+            .child(tab_button("Issues", RepositorySidebarTab::Issues))
+    }
+
+    fn render_repository_issue_sidebar(
+        &mut self,
+        repository_index: usize,
+        issue_target: IssueTarget,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = self.theme();
+        let issue_state = self.issue_list_state(&issue_target).cloned().unwrap_or_default();
+        let issue_loading = issue_state.loading;
+        let issue_error = issue_state.error.clone();
+        let issue_notice = issue_state.notice.clone();
+        let issue_rows = issue_state.issues.clone();
+        let source_label = issue_state
+            .source
+            .as_ref()
+            .map(issue_source_summary)
+            .unwrap_or_else(|| "Repository issues".to_owned());
+        let modal_source_label = issue_state
+            .source
+            .as_ref()
+            .map(issue_modal_source_label)
+            .unwrap_or_else(|| "Issue".to_owned());
+        let mut content = div().flex().flex_col().gap_1();
+
+        if let Some(error) = issue_error.clone() {
+            content = content.child(
+                div()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(0xa44949))
+                    .bg(rgb(0x4d2a2a))
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(rgb(0xffd7d7))
+                    .child(error),
+            );
+        }
+
+        if let Some(notice) = issue_notice.clone() {
+            content = content.child(
+                div()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.panel_bg))
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child(notice),
+            );
+        }
+
+        if issue_loading && issue_rows.is_empty() {
+            content = content.child(
+                div()
+                    .px_2()
+                    .py_2()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child("Loading issues…"),
+            );
+        } else if issue_error.is_none() && issue_notice.is_none() && issue_rows.is_empty()
+        {
+            content = content.child(
+                div()
+                    .px_2()
+                    .py_2()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child("No issues found."),
+            );
+        }
+
+        for (row_id, issue) in issue_rows.into_iter().enumerate() {
+            let issue_target = issue_target.clone();
+            let issue_source_label = modal_source_label.clone();
+            let issue_context = issue.clone();
+            let issue_status_color = if issue.linked_review.is_some() {
+                theme.accent
+            } else if issue.linked_branch.is_some() {
+                theme.text_primary
+            } else {
+                theme.text_disabled
+            };
+            let issue_status_label = if let Some(review) = issue.linked_review.as_ref() {
+                match review.kind {
+                    terminal_daemon_http::IssueReviewKind::PullRequest => "PR",
+                    terminal_daemon_http::IssueReviewKind::MergeRequest => "MR",
+                }
+            } else if issue.linked_branch.is_some() {
+                "branch"
+            } else {
+                "open"
+            };
+
+            content = content.child(
+                div()
+                    .id(ElementId::Name(
+                        format!("repository-issue-row-{repository_index}-{row_id}").into(),
+                    ))
+                    .cursor_pointer()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.panel_bg))
+                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_issue_create_modal_for_target(
+                            issue_target.clone(),
+                            issue_source_label.clone(),
+                            issue_context.clone(),
+                            cx,
+                        );
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family(FONT_MONO)
+                                    .text_color(rgb(theme.accent))
+                                    .child(issue.display_id.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(issue_status_color))
+                                    .child(issue_status_label),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_primary))
+                            .child(issue.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_xs()
+                                    .font_family(FONT_MONO)
+                                    .text_color(rgb(theme.text_disabled))
+                                    .child(issue.suggested_worktree_name.clone()),
+                            )
+                            .when_some(issue.linked_review.clone(), |this, review| {
+                                let review_url = review.url.clone();
+                                this.child(
+                                    div()
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(rgb(theme.accent))
+                                        .hover(|this| this.text_color(rgb(theme.text_primary)))
+                                        .child(review.label)
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                if let Some(url) = review_url.as_deref() {
+                                                    this.open_external_url(url, cx);
+                                                    cx.stop_propagation();
+                                                }
+                                            }),
+                                        ),
+                                )
+                            })
+                            .when_some(issue.linked_branch.clone(), |this, branch| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .font_family(FONT_MONO)
+                                        .text_color(rgb(theme.text_muted))
+                                        .child(branch),
+                                )
+                            }),
+                    ),
+            );
+        }
+
+        div()
+            .pl(px(22.))
+            .pr_1()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child(source_label),
+                    )
+                    .child(
+                        div()
+                            .id(("repository-issues-refresh", repository_index))
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(rgb(if issue_loading {
+                                theme.text_disabled
+                            } else {
+                                theme.accent
+                            }))
+                            .hover(|this| this.text_color(rgb(theme.text_primary)))
+                            .child(if issue_loading { "Loading…" } else { "Refresh" })
+                            .when(!issue_loading, |this| {
+                                this.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.refresh_issues_for_target(issue_target.clone(), cx);
+                                    cx.stop_propagation();
+                                }))
+                            }),
+                    ),
+            )
+            .child(content)
     }
 
     fn render_repository_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
@@ -2136,12 +2503,7 @@ impl ArborWindow {
         if let Some(ref pr) = worktree.pr_details {
             card = card.child(div().h(px(1.)).bg(rgb(theme.border)).my_1());
 
-            let (state_label, state_color) = match pr.state {
-                github_service::PrState::Open => ("Open", 0x72d69c_u32),
-                github_service::PrState::Draft => ("Draft", theme.text_disabled),
-                github_service::PrState::Merged => ("Merged", 0xbb9af7_u32),
-                github_service::PrState::Closed => ("Closed", 0xeb6f92_u32),
-            };
+            let (state_label, state_color) = pr_state_presentation(&theme, pr.state);
 
             let pr_url = pr.url.clone();
             let mut pr_header = div()
@@ -2205,17 +2567,8 @@ impl ArborWindow {
                 let mut status_row = div().flex().items_center().gap_1();
 
                 if !pr.checks.is_empty() {
-                    let passed = pr
-                        .checks
-                        .iter()
-                        .filter(|(_, s)| *s == github_service::CheckStatus::Success)
-                        .count();
-                    let total = pr.checks.len();
-                    let (check_icon, check_color) = match pr.checks_status {
-                        github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
-                        github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
-                        github_service::CheckStatus::Pending => ("\u{f192}", 0xe5c07b_u32),
-                    };
+                    let (passed, total) = pr_check_counts(pr);
+                    let (check_icon, check_color) = check_status_presentation(pr.checks_status);
                     let chevron = if checks_expanded {
                         "\u{f078}"
                     } else {
@@ -2256,20 +2609,25 @@ impl ArborWindow {
                     );
                 }
 
-                let (review_label, review_color) = match pr.review_decision {
-                    github_service::ReviewDecision::Approved => ("Approved", 0x72d69c_u32),
-                    github_service::ReviewDecision::ChangesRequested => {
-                        ("Changes requested", 0xeb6f92_u32)
-                    },
-                    github_service::ReviewDecision::Pending => {
-                        ("Review pending", theme.text_disabled)
-                    },
-                };
+                let (review_icon, review_label, review_color) =
+                    review_status_presentation(pr.review_decision);
                 status_row = status_row.child(
                     div()
-                        .text_xs()
-                        .text_color(rgb(review_color))
-                        .child(review_label),
+                        .flex()
+                        .items_center()
+                        .gap(px(3.))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(review_color))
+                                .child(review_icon),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(review_color))
+                                .child(review_label),
+                        ),
                 );
 
                 card = card.child(status_row);
@@ -2277,18 +2635,8 @@ impl ArborWindow {
                 // Expanded checks list
                 if checks_expanded {
                     let mut checks_list = div().flex().flex_col().gap(px(2.)).pl_2();
-                    let mut sorted_checks: Vec<_> = pr.checks.iter().collect();
-                    sorted_checks.sort_by_key(|(_, status)| match status {
-                        github_service::CheckStatus::Failure => 0,
-                        github_service::CheckStatus::Pending => 1,
-                        github_service::CheckStatus::Success => 2,
-                    });
-                    for (name, status) in sorted_checks {
-                        let (icon, color) = match status {
-                            github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
-                            github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
-                            github_service::CheckStatus::Pending => ("\u{f192}", 0xe5c07b_u32),
-                        };
+                    for (name, status) in sorted_pr_checks_for_display(pr) {
+                        let (icon, color) = check_status_presentation(*status);
                         checks_list = checks_list.child(
                             div()
                                 .flex()

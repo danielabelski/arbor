@@ -188,29 +188,46 @@ impl ArborWindow {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        let raw_clone = raw_lines.clone();
-        match fs::write(&full_path, &content) {
-            Ok(()) => {
-                let highlighted = highlight_lines_with_syntect(&raw_clone, &ext, 0xc8ccd4);
-                if let Some(s) = self
-                    .file_view_sessions
-                    .iter_mut()
-                    .find(|s| s.id == session_id)
-                    && let FileViewContent::Text {
-                        highlighted: h,
-                        dirty: d,
-                        ..
-                    } = &mut s.content
-                {
-                    *h = Arc::from(highlighted);
-                    *d = false;
+        let saved_raw_lines = raw_lines.clone();
+        let raw_for_highlight = saved_raw_lines.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    fs::write(&full_path, &content)
+                        .map_err(|error| format!("Failed to save: {error}"))?;
+                    let highlighted =
+                        highlight_lines_with_syntect(&raw_for_highlight, &ext, 0xc8ccd4);
+                    Ok::<Arc<[Vec<FileViewSpan>]>, String>(Arc::from(highlighted))
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(highlighted) => {
+                        if let Some(s) = this
+                            .file_view_sessions
+                            .iter_mut()
+                            .find(|s| s.id == session_id)
+                            && let FileViewContent::Text {
+                                raw_lines: current_raw_lines,
+                                highlighted: current,
+                                dirty,
+                                ..
+                            } = &mut s.content
+                            && *current_raw_lines == saved_raw_lines
+                        {
+                            *current = highlighted;
+                            *dirty = false;
+                        }
+                    },
+                    Err(error) => {
+                        this.notice = Some(error);
+                    },
                 }
-            },
-            Err(error) => {
-                self.notice = Some(format!("Failed to save: {error}"));
-            },
-        }
-        cx.notify();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 

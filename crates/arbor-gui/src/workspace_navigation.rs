@@ -1,4 +1,11 @@
 impl ArborWindow {
+    fn issue_target_for_repository(&self, repository: &RepositorySummary) -> IssueTarget {
+        IssueTarget {
+            daemon_target: ManagedDaemonTarget::Primary,
+            repo_root: repository.root.display().to_string(),
+        }
+    }
+
     fn issue_target_for_current_selection(&self) -> Option<IssueTarget> {
         if let Some(active_remote_worktree) = self.active_remote_worktree.as_ref() {
             return Some(IssueTarget {
@@ -18,10 +25,8 @@ impl ArborWindow {
             });
         }
 
-        self.selected_repository().map(|repository| IssueTarget {
-            daemon_target: ManagedDaemonTarget::Primary,
-            repo_root: repository.root.display().to_string(),
-        })
+        self.selected_repository()
+            .map(|repository| self.issue_target_for_repository(repository))
     }
 
     fn daemon_client_for_target(
@@ -37,67 +42,55 @@ impl ArborWindow {
         }
     }
 
+    fn issue_list_state(&self, target: &IssueTarget) -> Option<&IssueListState> {
+        self.issue_lists.get(target)
+    }
+
+    fn issue_list_state_mut(&mut self, target: &IssueTarget) -> &mut IssueListState {
+        self.issue_lists.entry(target.clone()).or_default()
+    }
+
     fn sync_issue_target(&mut self, cx: &mut Context<Self>) {
-        let next_target = self.issue_target_for_current_selection();
-        if self.issues_target == next_target {
-            return;
-        }
-
-        self.issues_target = next_target;
-        self.issues.clear();
-        self.issue_source = None;
-        self.issues_error = None;
-        self.issues_loading = false;
-        self.issues_notice = if self.active_outpost_index.is_some() {
-            Some(
-                "Issues are unavailable for SSH outposts. Select a daemon-backed repository instead."
-                    .to_owned(),
-            )
-        } else {
-            None
-        };
-
         if self.right_pane_tab == RightPaneTab::Issues {
-            self.refresh_issues(cx);
+            if let Some(target) = self.issue_target_for_current_selection() {
+                self.ensure_issues_loaded_for_target(target, cx);
+            } else {
+                cx.notify();
+            }
         } else {
             cx.notify();
         }
     }
 
-    fn refresh_issues(&mut self, cx: &mut Context<Self>) {
-        let Some(target) = self.issue_target_for_current_selection() else {
-            self.issues.clear();
-            self.issue_source = None;
-            self.issues_error = None;
-            self.issues_loading = false;
-            self.issues_target = None;
-            self.issues_notice = if self.active_outpost_index.is_some() {
-                Some(
-                    "Issues are unavailable for SSH outposts. Select a daemon-backed repository instead."
-                        .to_owned(),
-                )
-            } else {
-                Some("Select a repository to load issues.".to_owned())
-            };
+    fn ensure_issues_loaded_for_target(&mut self, target: IssueTarget, cx: &mut Context<Self>) {
+        if self
+            .issue_list_state(&target)
+            .is_some_and(|state| state.loading || state.loaded)
+        {
             cx.notify();
             return;
-        };
+        }
 
+        self.refresh_issues_for_target(target, cx);
+    }
+
+    fn refresh_issues_for_target(&mut self, target: IssueTarget, cx: &mut Context<Self>) {
         let Some(client) = self.daemon_client_for_target(&target) else {
-            self.issues.clear();
-            self.issue_source = None;
-            self.issues_error = Some("No daemon connection is available for this repository.".to_owned());
-            self.issues_loading = false;
-            self.issues_notice = None;
-            self.issues_target = Some(target);
+            let state = self.issue_list_state_mut(&target);
+            state.issues.clear();
+            state.source = None;
+            state.notice = None;
+            state.error = Some("No daemon connection is available for this repository.".to_owned());
+            state.loading = false;
+            state.loaded = true;
             cx.notify();
             return;
         };
 
-        self.issues_loading = true;
-        self.issues_error = None;
-        self.issues_notice = None;
-        self.issues_target = Some(target.clone());
+        let state = self.issue_list_state_mut(&target);
+        state.loading = true;
+        state.error = None;
+        state.notice = None;
         self.ensure_loading_animation(cx);
         cx.notify();
 
@@ -108,30 +101,49 @@ impl ArborWindow {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
-                if this.issue_target_for_current_selection().as_ref() != Some(&target) {
-                    return;
-                }
-
-                this.issues_loading = false;
-                this.issues_target = Some(target.clone());
+                let state = this.issue_list_state_mut(&target);
+                state.loading = false;
+                state.loaded = true;
                 match response {
                     Ok(response) => {
-                        this.issues = response.issues;
-                        this.issue_source = response.source;
-                        this.issues_notice = response.notice;
-                        this.issues_error = None;
+                        state.issues = response.issues;
+                        state.source = response.source;
+                        state.notice = response.notice;
+                        state.error = None;
                     },
                     Err(error) => {
-                        this.issues.clear();
-                        this.issue_source = None;
-                        this.issues_notice = None;
-                        this.issues_error = Some(format!("failed to load issues: {error}"));
+                        state.issues.clear();
+                        state.source = None;
+                        state.notice = None;
+                        state.error = Some(format!("failed to load issues: {error}"));
                     },
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn sync_visible_repository_issue_tabs(&mut self, cx: &mut Context<Self>) {
+        let targets: Vec<IssueTarget> = self
+            .repositories
+            .iter()
+            .enumerate()
+            .filter(|(index, repository)| {
+                !self.collapsed_repositories.contains(index)
+                    && self
+                        .repository_sidebar_tabs
+                        .get(&repository.group_key)
+                        .copied()
+                        .unwrap_or_default()
+                        == RepositorySidebarTab::Issues
+            })
+            .map(|(_, repository)| self.issue_target_for_repository(repository))
+            .collect();
+
+        for target in targets {
+            self.ensure_issues_loaded_for_target(target, cx);
+        }
     }
 
     fn selected_worktree_path(&self) -> Option<&Path> {
@@ -279,7 +291,7 @@ impl ArborWindow {
             .map(CenterTab::Terminal)
     }
 
-    fn ensure_selected_worktree_terminal(&mut self) -> bool {
+    fn ensure_selected_worktree_terminal(&mut self, cx: &mut Context<Self>) -> bool {
         // Don't auto-spawn local terminals when an outpost is selected;
         // outpost terminals are created explicitly via spawn_outpost_terminal.
         if self.active_outpost_index.is_some() {
@@ -295,7 +307,7 @@ impl ArborWindow {
             .iter()
             .any(|session| session.worktree_path == worktree_path);
         if !has_terminal {
-            return self.spawn_terminal_session_inner(false);
+            return self.spawn_terminal_session_inner(false, cx);
         }
 
         if let Some(session_id) = self.active_terminal_id_for_worktree(&worktree_path) {
@@ -712,7 +724,7 @@ impl ArborWindow {
             .position(|worktree| worktree.group_key == repository.group_key);
         self.refresh_worktrees(cx);
         self.refresh_repo_config_if_changed(cx);
-        self.sync_selected_worktree_notes();
+        self.sync_selected_worktree_notes(cx);
         self.sync_issue_target(cx);
         self.focus_terminal_on_next_render = true;
         cx.notify();
@@ -1119,15 +1131,15 @@ impl ArborWindow {
         self.sync_active_repository_from_selected_worktree();
         self.refresh_repo_config_if_changed(cx);
         let _ = self.reload_changed_files();
-        self.sync_selected_worktree_notes();
+        self.sync_selected_worktree_notes(cx);
         self.sync_issue_target(cx);
         self.expanded_dirs.clear();
         self.selected_file_tree_entry = None;
         self.file_tree_entries.clear();
         if self.right_pane_tab == RightPaneTab::FileTree {
-            self.rebuild_file_tree();
+            self.rebuild_file_tree(cx);
         }
-        if self.ensure_selected_worktree_terminal() {
+        if self.ensure_selected_worktree_terminal(cx) {
             self.sync_daemon_session_store(cx);
         }
         self.terminal_scroll_handle.scroll_to_bottom();
@@ -1250,7 +1262,7 @@ impl ArborWindow {
         self.active_remote_worktree = None;
         self.changed_files.clear();
         self.selected_changed_file = None;
-        self.sync_selected_worktree_notes();
+        self.sync_selected_worktree_notes(cx);
         self.sync_issue_target(cx);
         self.refresh_remote_changed_files(cx);
         cx.notify();
@@ -1284,6 +1296,12 @@ impl ArborWindow {
 
         self.sync_selected_changed_file();
         self.changed_files != previous_files || self.notice != previous_notice
+    }
+
+    fn refresh_changed_files(&mut self, cx: &mut Context<Self>) {
+        if self.reload_changed_files() {
+            cx.notify();
+        }
     }
 
     fn refresh_remote_changed_files(&mut self, cx: &mut Context<Self>) {
@@ -1417,20 +1435,49 @@ impl ArborWindow {
             .find(|change| change.path == *selected_path)
     }
 
-    fn rebuild_file_tree(&mut self) {
+    fn rebuild_file_tree(&mut self, cx: &mut Context<Self>) {
         let Some(worktree_path) = self.selected_worktree_path().map(|p| p.to_path_buf()) else {
             self.file_tree_entries.clear();
+            self.file_tree_loading = false;
             return;
         };
-        let mut entries = Vec::new();
-        self.walk_directory(&worktree_path, &worktree_path, 0, &mut entries);
-        self.file_tree_entries = entries;
+        let expanded_dirs = self.expanded_dirs.clone();
+        self.file_tree_loading = true;
+        cx.notify();
+
+        self._file_tree_refresh_task = Some(cx.spawn(async move |this, cx| {
+            let refresh_path = worktree_path.clone();
+            let entries = cx
+                .background_spawn(async move {
+                    let mut entries = Vec::new();
+                    Self::walk_directory(
+                        &refresh_path,
+                        &refresh_path,
+                        &expanded_dirs,
+                        0,
+                        &mut entries,
+                    );
+                    entries
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .selected_worktree_path()
+                    .is_some_and(|path| path == worktree_path.as_path())
+                {
+                    this.file_tree_entries = entries;
+                    this.file_tree_loading = false;
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn walk_directory(
-        &self,
         base: &Path,
         dir: &Path,
+        expanded_dirs: &HashSet<PathBuf>,
         depth: usize,
         entries: &mut Vec<FileTreeEntry>,
     ) {
@@ -1472,8 +1519,8 @@ impl ArborWindow {
                 is_dir,
                 depth,
             });
-            if is_dir && self.expanded_dirs.contains(&relative) {
-                self.walk_directory(base, &full_path, depth + 1, entries);
+            if is_dir && expanded_dirs.contains(&relative) {
+                Self::walk_directory(base, &full_path, expanded_dirs, depth + 1, entries);
             }
         }
     }
@@ -1485,7 +1532,7 @@ impl ArborWindow {
             self.expanded_dirs.insert(path.clone());
         }
         self.selected_file_tree_entry = Some(path);
-        self.rebuild_file_tree();
+        self.rebuild_file_tree(cx);
         cx.notify();
     }
 
@@ -1537,10 +1584,14 @@ impl ArborWindow {
         self.right_pane_search_cursor = 0;
         self.right_pane_search_active = false;
         if tab == RightPaneTab::Issues {
-            self.refresh_issues(cx);
+            if let Some(target) = self.issue_target_for_current_selection() {
+                self.ensure_issues_loaded_for_target(target, cx);
+            } else {
+                cx.notify();
+            }
         }
         if tab == RightPaneTab::FileTree && self.file_tree_entries.is_empty() {
-            self.rebuild_file_tree();
+            self.rebuild_file_tree(cx);
         }
         if tab != RightPaneTab::Notes {
             self.worktree_notes_active = false;
@@ -1548,7 +1599,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn sync_selected_worktree_notes(&mut self) {
+    fn sync_selected_worktree_notes(&mut self, cx: &mut Context<Self>) {
         let Some(worktree_path) = self.selected_local_worktree_path().map(Path::to_path_buf) else {
             if self.worktree_notes_path.is_none() {
                 return;
@@ -1570,54 +1621,111 @@ impl ArborWindow {
         self.worktree_notes_error = None;
         self.worktree_notes_cursor = FileViewCursor { line: 0, col: 0 };
         self.worktree_notes_path = Some(notes_path.clone());
+        self.worktree_notes_lines = vec![String::new()];
+        self.worktree_notes_edit_generation = self.worktree_notes_edit_generation.wrapping_add(1);
+        let load_generation = self.worktree_notes_edit_generation;
 
-        match fs::read_to_string(&notes_path) {
-            Ok(content) => {
-                let mut lines: Vec<String> = content.lines().map(ToOwned::to_owned).collect();
-                if lines.is_empty() {
-                    lines.push(String::new());
+        cx.spawn(async move |this, cx| {
+            let notes_path_for_read = notes_path.clone();
+            let result = cx
+                .background_spawn(async move { fs::read_to_string(&notes_path_for_read) })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                if !worktree_notes_load_is_current(
+                    load_generation,
+                    this.worktree_notes_edit_generation,
+                    this.worktree_notes_path.as_deref(),
+                    notes_path.as_path(),
+                    load_generation,
+                    this.worktree_notes_edit_generation,
+                ) {
+                    return;
                 }
-                let last_line = lines.len().saturating_sub(1);
-                let last_col = lines[last_line].chars().count();
-                self.worktree_notes_lines = lines;
-                self.worktree_notes_cursor = FileViewCursor {
-                    line: last_line,
-                    col: last_col,
-                };
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.worktree_notes_lines = vec![String::new()];
-            },
-            Err(error) => {
-                self.worktree_notes_lines = vec![String::new()];
-                self.worktree_notes_error = Some(format!("failed to load notes: {error}"));
-            },
-        }
+
+                match result {
+                    Ok(content) => {
+                        let mut lines: Vec<String> =
+                            content.lines().map(ToOwned::to_owned).collect();
+                        if lines.is_empty() {
+                            lines.push(String::new());
+                        }
+                        let last_line = lines.len().saturating_sub(1);
+                        let last_col = lines[last_line].chars().count();
+                        this.worktree_notes_lines = lines;
+                        this.worktree_notes_cursor = FileViewCursor {
+                            line: last_line,
+                            col: last_col,
+                        };
+                        this.worktree_notes_error = None;
+                    },
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        this.worktree_notes_lines = vec![String::new()];
+                        this.worktree_notes_error = None;
+                    },
+                    Err(error) => {
+                        this.worktree_notes_lines = vec![String::new()];
+                        this.worktree_notes_error = Some(format!("failed to load notes: {error}"));
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
-    fn save_selected_worktree_notes(&mut self) {
+    fn save_selected_worktree_notes(&mut self, cx: &mut Context<Self>) {
+        self.worktree_notes_save_pending = true;
+        self.start_pending_worktree_notes_save(cx);
+    }
+
+    fn start_pending_worktree_notes_save(&mut self, cx: &mut Context<Self>) {
+        if self._worktree_notes_save_task.is_some() || !self.worktree_notes_save_pending {
+            return;
+        }
+
         let Some(path) = self.worktree_notes_path.clone() else {
+            self.worktree_notes_save_pending = false;
             return;
         };
         let content = self.worktree_notes_lines.join("\n");
-        if let Some(parent) = path.parent()
-            && let Err(error) = fs::create_dir_all(parent)
-        {
-            self.worktree_notes_error = Some(format!("failed to create notes directory: {error}"));
-            return;
-        }
+        self.worktree_notes_save_pending = false;
 
-        match fs::write(&path, content) {
-            Ok(()) => {
-                self.worktree_notes_error = None;
-            },
-            Err(error) => {
-                self.worktree_notes_error = Some(format!("failed to save notes: {error}"));
-            },
-        }
+        self._worktree_notes_save_task = Some(cx.spawn(async move |this, cx| {
+            let path_for_write = path.clone();
+            let result = cx
+                .background_spawn(async move {
+                    if let Some(parent) = path_for_write.parent() {
+                        fs::create_dir_all(parent).map_err(|error| {
+                            format!("failed to create notes directory: {error}")
+                        })?;
+                    }
+
+                    fs::write(&path_for_write, content)
+                        .map_err(|error| format!("failed to save notes: {error}"))
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this._worktree_notes_save_task = None;
+                if this.worktree_notes_path.as_ref() == Some(&path) {
+                    match result {
+                        Ok(()) => {
+                            this.worktree_notes_error = None;
+                        },
+                        Err(error) => {
+                            this.worktree_notes_error = Some(error);
+                        },
+                    }
+                }
+                this.start_pending_worktree_notes_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
+                cx.notify();
+            });
+        }));
     }
 
-    fn insert_text_into_selected_worktree_notes(&mut self, text: &str) {
+    fn insert_text_into_selected_worktree_notes(&mut self, text: &str, cx: &mut Context<Self>) {
         if self.worktree_notes_lines.is_empty() {
             self.worktree_notes_lines.push(String::new());
         }
@@ -1641,7 +1749,8 @@ impl ArborWindow {
             self.worktree_notes_cursor.col += 1;
         }
 
-        self.save_selected_worktree_notes();
+        self.worktree_notes_edit_generation = self.worktree_notes_edit_generation.wrapping_add(1);
+        self.save_selected_worktree_notes(cx);
     }
 
     fn handle_worktree_notes_key_down(
@@ -1680,7 +1789,9 @@ impl ArborWindow {
                     self.worktree_notes_cursor.col = previous.chars().count();
                     previous.push_str(&removed);
                 }
-                self.save_selected_worktree_notes();
+                self.worktree_notes_edit_generation =
+                    self.worktree_notes_edit_generation.wrapping_add(1);
+                self.save_selected_worktree_notes(cx);
                 cx.notify();
                 return true;
             },
@@ -1699,12 +1810,14 @@ impl ArborWindow {
                         .remove(self.worktree_notes_cursor.line + 1);
                     self.worktree_notes_lines[self.worktree_notes_cursor.line].push_str(&next);
                 }
-                self.save_selected_worktree_notes();
+                self.worktree_notes_edit_generation =
+                    self.worktree_notes_edit_generation.wrapping_add(1);
+                self.save_selected_worktree_notes(cx);
                 cx.notify();
                 return true;
             },
             "enter" | "return" => {
-                self.insert_text_into_selected_worktree_notes("\n");
+                self.insert_text_into_selected_worktree_notes("\n", cx);
                 cx.notify();
                 return true;
             },
@@ -1772,7 +1885,7 @@ impl ArborWindow {
                 return true;
             },
             "tab" => {
-                self.insert_text_into_selected_worktree_notes("    ");
+                self.insert_text_into_selected_worktree_notes("    ", cx);
                 cx.notify();
                 return true;
             },
@@ -1783,7 +1896,7 @@ impl ArborWindow {
             return false;
         }
         if let Some(text) = event.keystroke.key_char.as_deref() {
-            self.insert_text_into_selected_worktree_notes(text);
+            self.insert_text_into_selected_worktree_notes(text, cx);
             cx.notify();
             return true;
         }
