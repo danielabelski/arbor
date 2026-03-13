@@ -1,3 +1,27 @@
+fn ui_state_save_has_work(
+    pending_ui_state_save: Option<&ui_state_store::UiState>,
+    ui_state_save_in_flight: Option<&ui_state_store::UiState>,
+) -> bool {
+    pending_ui_state_save.is_some() || ui_state_save_in_flight.is_some()
+}
+
+fn next_pending_ui_state_save(
+    last_persisted_ui_state: &ui_state_store::UiState,
+    pending_ui_state_save: Option<&ui_state_store::UiState>,
+    ui_state_save_in_flight: Option<&ui_state_store::UiState>,
+    next_state: &ui_state_store::UiState,
+) -> Option<ui_state_store::UiState> {
+    if pending_ui_state_save == Some(next_state) || ui_state_save_in_flight == Some(next_state) {
+        return pending_ui_state_save.cloned();
+    }
+
+    if last_persisted_ui_state == next_state && ui_state_save_in_flight.is_none() {
+        return None;
+    }
+
+    Some(next_state.clone())
+}
+
 impl ArborWindow {
     fn clamp_pane_widths_for_workspace(&mut self, workspace_width: f32) {
         let available_side_width =
@@ -138,24 +162,61 @@ impl ArborWindow {
         }
     }
 
-    fn sync_ui_state_store(&mut self, window: &Window) {
+    fn sync_ui_state_store(&mut self, window: &Window, cx: &mut Context<Self>) {
         let next_state = self.ui_state_snapshot(window);
-        if self.last_persisted_ui_state == next_state {
+        let queued_ui_state_save = next_pending_ui_state_save(
+            &self.last_persisted_ui_state,
+            self.pending_ui_state_save.as_ref(),
+            self.ui_state_save_in_flight.as_ref(),
+            &next_state,
+        );
+        let should_start_save =
+            queued_ui_state_save.is_some() && self.ui_state_save_in_flight.is_none();
+        self.pending_ui_state_save = queued_ui_state_save;
+        if !should_start_save {
             return;
         }
 
-        match self.ui_state_store.save(&next_state) {
-            Ok(()) => {
-                self.last_persisted_ui_state = next_state;
-                self.last_ui_state_error = None;
-            },
-            Err(error) => {
-                if self.last_ui_state_error.as_deref() != Some(error.as_str()) {
-                    self.notice = Some(format!("failed to persist UI state: {error}"));
-                    self.last_ui_state_error = Some(error);
-                }
-            },
+        self.start_pending_ui_state_save(cx);
+    }
+
+    fn start_pending_ui_state_save(&mut self, cx: &mut Context<Self>) {
+        if self.ui_state_save_in_flight.is_some() {
+            return;
         }
+
+        let Some(next_state) = self.pending_ui_state_save.take() else {
+            self.maybe_finish_quit_after_persistence_flush(cx);
+            return;
+        };
+
+        self.ui_state_save_in_flight = Some(next_state.clone());
+        let store = self.ui_state_store.clone();
+        let state_to_save = next_state.clone();
+        self._ui_state_save_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { store.save(&state_to_save) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.ui_state_save_in_flight = None;
+                match result {
+                    Ok(()) => {
+                        this.last_persisted_ui_state = next_state.clone();
+                        this.last_ui_state_error = None;
+                    },
+                    Err(error) => {
+                        if this.last_ui_state_error.as_deref() != Some(error.as_str()) {
+                            this.notice = Some(format!("failed to persist UI state: {error}"));
+                            this.last_ui_state_error = Some(error);
+                            cx.notify();
+                        }
+                    },
+                }
+
+                this.start_pending_ui_state_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
+            });
+        }));
     }
 
     fn handle_pane_divider_drag_move(
@@ -186,7 +247,7 @@ impl ArborWindow {
         }
 
         self.clamp_pane_widths_for_workspace(workspace_width);
-        self.sync_ui_state_store(window);
+        self.sync_ui_state_store(window, cx);
         cx.stop_propagation();
         cx.notify();
     }
