@@ -311,7 +311,6 @@ impl ArborWindow {
                     top_bar_quick_actions_open: false,
                     top_bar_quick_actions_submenu: None,
                     ide_launchers: Vec::new(),
-                    terminal_launchers: Vec::new(),
                     last_persisted_ui_state: startup_ui_state,
                     pending_ui_state_save: None,
                     ui_state_save_in_flight: None,
@@ -319,6 +318,7 @@ impl ArborWindow {
                     last_ui_state_error: None,
                     notification_service,
                     notifications_enabled,
+                    agent_activity_sessions: HashMap::new(),
                     last_agent_finished_notifications: HashMap::new(),
                     auto_checkpoint_in_flight: Arc::new(Mutex::new(HashSet::new())),
                     agent_activity_epochs: Arc::new(Mutex::new(HashMap::new())),
@@ -686,7 +686,6 @@ impl ArborWindow {
             top_bar_quick_actions_open: false,
             top_bar_quick_actions_submenu: None,
             ide_launchers: Vec::new(),
-            terminal_launchers: Vec::new(),
             left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
             collapsed_repositories: HashSet::new(),
             repository_context_menu: None,
@@ -725,6 +724,7 @@ impl ArborWindow {
             last_ui_state_error: None,
             notification_service,
             notifications_enabled,
+            agent_activity_sessions: HashMap::new(),
             last_agent_finished_notifications: HashMap::new(),
             auto_checkpoint_in_flight: Arc::new(Mutex::new(HashSet::new())),
             agent_activity_epochs: Arc::new(Mutex::new(HashMap::new())),
@@ -2083,6 +2083,7 @@ impl ArborWindow {
 
                     let rows_changed = worktree_rows_changed(&this.worktrees, &next_worktrees);
                     this.worktrees = next_worktrees;
+                    reconcile_worktree_agent_activity(this, false, cx);
                     this.worktree_stats_loading = this
                         .worktrees
                         .iter()
@@ -2649,20 +2650,6 @@ impl ArborWindow {
         };
 
         (path, pr_number, pr_url, details)
-    }
-
-    fn switch_terminal_backend(
-        &mut self,
-        backend_kind: TerminalBackendKind,
-        cx: &mut Context<Self>,
-    ) {
-        if self.active_backend_kind == backend_kind {
-            return;
-        }
-
-        self.active_backend_kind = backend_kind;
-        self.notice = None;
-        cx.notify();
     }
 
     fn switch_theme(&mut self, theme_kind: ThemeKind, cx: &mut Context<Self>) {
@@ -3432,33 +3419,6 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn action_use_embedded_backend(
-        &mut self,
-        _: &UseEmbeddedBackend,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_terminal_backend(TerminalBackendKind::Embedded, cx);
-    }
-
-    fn action_use_alacritty_backend(
-        &mut self,
-        _: &UseAlacrittyBackend,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_terminal_backend(TerminalBackendKind::Alacritty, cx);
-    }
-
-    fn action_use_ghostty_backend(
-        &mut self,
-        _: &UseGhosttyBackend,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_terminal_backend(TerminalBackendKind::Ghostty, cx);
-    }
-
     fn action_toggle_left_pane(
         &mut self,
         _: &ToggleLeftPane,
@@ -3660,9 +3620,7 @@ impl ArborWindow {
             runtime: None,
         });
 
-        let daemon = (backend_kind == TerminalBackendKind::Embedded)
-            .then(|| self.terminal_daemon.clone())
-            .flatten();
+        let daemon = self.terminal_daemon.clone();
         let shell = self.embedded_shell();
         let target_grid_size = self.last_terminal_grid_size.unwrap_or((0, 0));
         let poll_tx = self.terminal_poll_tx.clone();
@@ -3676,11 +3634,6 @@ impl ArborWindow {
                 },
                 Embedded {
                     runtime: EmbeddedTerminal,
-                    notice: Option<String>,
-                    clear_global_daemon: bool,
-                },
-                External {
-                    result: terminal_backend::TerminalRunResult,
                     notice: Option<String>,
                     clear_global_daemon: bool,
                 },
@@ -3740,11 +3693,6 @@ impl ArborWindow {
                     ) {
                         Ok(TerminalLaunch::Embedded(runtime)) => SpawnTerminalOutcome::Embedded {
                             runtime,
-                            notice: fallback_notice,
-                            clear_global_daemon,
-                        },
-                        Ok(TerminalLaunch::External(result)) => SpawnTerminalOutcome::External {
-                            result,
                             notice: fallback_notice,
                             clear_global_daemon,
                         },
@@ -3834,35 +3782,6 @@ impl ArborWindow {
                         session.cursor = None;
                         session.exit_code = None;
                         session.updated_at_unix_ms = current_unix_timestamp_millis();
-                    },
-                    SpawnTerminalOutcome::External {
-                        result,
-                        notice,
-                        clear_global_daemon,
-                    } => {
-                        if clear_global_daemon {
-                            this.terminal_daemon = None;
-                        }
-                        if let Some(notice) = notice {
-                            this.notice = Some(notice);
-                        }
-                        session.command = result.command;
-                        session.output = trim_to_last_lines(result.output, 120);
-                        session.styled_output.clear();
-                        session.cursor = None;
-                        session.state = if result.success {
-                            TerminalState::Completed
-                        } else {
-                            TerminalState::Failed
-                        };
-                        session.exit_code = result.code;
-                        session.updated_at_unix_ms = current_unix_timestamp_millis();
-                        if !result.success {
-                            this.notice = Some(format!(
-                                "terminal backend launch failed with code {:?}",
-                                result.code,
-                            ));
-                        }
                     },
                     SpawnTerminalOutcome::Failed {
                         error,
@@ -4690,9 +4609,6 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_refresh_changes))
             .on_action(cx.listener(Self::action_open_add_repository))
             .on_action(cx.listener(Self::action_open_create_worktree))
-            .on_action(cx.listener(Self::action_use_embedded_backend))
-            .on_action(cx.listener(Self::action_use_alacritty_backend))
-            .on_action(cx.listener(Self::action_use_ghostty_backend))
             .on_action(cx.listener(Self::action_toggle_left_pane))
             .on_action(cx.listener(Self::action_navigate_worktree_back))
             .on_action(cx.listener(Self::action_navigate_worktree_forward))
@@ -4869,6 +4785,14 @@ impl Render for ArborWindow {
     }
 }
 
+#[derive(Clone)]
+struct AgentWsSessionEntry {
+    session_id: String,
+    cwd: String,
+    state: AgentState,
+    updated_at_unix_ms: Option<u64>,
+}
+
 fn process_agent_ws_message(
     this: &gpui::WeakEntity<ArborWindow>,
     cx: &mut gpui::AsyncApp,
@@ -4888,9 +4812,10 @@ fn process_agent_ws_message(
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let entries: Vec<(String, AgentState, Option<u64>)> = sessions
+            let entries: Vec<AgentWsSessionEntry> = sessions
                 .iter()
                 .filter_map(|s| {
+                    let session_id = s.get("session_id")?.as_str()?;
                     let cwd = s.get("cwd")?.as_str()?;
                     let state_str = s.get("state")?.as_str()?;
                     let state = match state_str {
@@ -4899,12 +4824,22 @@ fn process_agent_ws_message(
                         _ => return None,
                     };
                     let updated_at = s.get("updated_at_unix_ms").and_then(|v| v.as_u64());
-                    Some((cwd.to_owned(), state, updated_at))
+                    Some(AgentWsSessionEntry {
+                        session_id: session_id.to_owned(),
+                        cwd: cwd.to_owned(),
+                        state,
+                        updated_at_unix_ms: updated_at,
+                    })
                 })
                 .collect();
             tracing::info!(count = entries.len(), "agent WS snapshot received");
-            for (cwd, state, _) in &entries {
-                tracing::info!(cwd = cwd.as_str(), ?state, "  snapshot entry");
+            for entry in &entries {
+                tracing::info!(
+                    session_id = entry.session_id.as_str(),
+                    cwd = entry.cwd.as_str(),
+                    state = ?entry.state,
+                    "  snapshot entry"
+                );
             }
             let _ = this.update(cx, |this, cx| {
                 apply_agent_ws_snapshot(this, &entries, cx);
@@ -4913,17 +4848,29 @@ fn process_agent_ws_message(
         },
         Some("update") => {
             if let Some(session) = value.get("session") {
+                let session_id = session.get("session_id").and_then(|v| v.as_str());
                 let cwd = session.get("cwd").and_then(|v| v.as_str());
                 let state_str = session.get("state").and_then(|v| v.as_str());
-                if let (Some(cwd), Some(state_str)) = (cwd, state_str) {
-                    tracing::info!(cwd, state = state_str, "agent WS update received");
+                if let (Some(session_id), Some(cwd), Some(state_str)) = (session_id, cwd, state_str)
+                {
+                    tracing::info!(
+                        session_id,
+                        cwd,
+                        state = state_str,
+                        "agent WS update received"
+                    );
                     let state = match state_str {
                         "working" => AgentState::Working,
                         "waiting" => AgentState::Waiting,
                         _ => return,
                     };
                     let updated_at = session.get("updated_at_unix_ms").and_then(|v| v.as_u64());
-                    let entries = vec![(cwd.to_owned(), state, updated_at)];
+                    let entries = vec![AgentWsSessionEntry {
+                        session_id: session_id.to_owned(),
+                        cwd: cwd.to_owned(),
+                        state,
+                        updated_at_unix_ms: updated_at,
+                    }];
                     let _ = this.update(cx, |this, cx| {
                         apply_agent_ws_update(this, &entries, cx);
                         cx.notify();
@@ -4937,84 +4884,136 @@ fn process_agent_ws_message(
 
 fn apply_agent_ws_snapshot(
     app: &mut ArborWindow,
-    entries: &[(String, AgentState, Option<u64>)],
+    entries: &[AgentWsSessionEntry],
     cx: &mut Context<ArborWindow>,
 ) {
-    tracing::info!(
-        count = entries.len(),
-        "agent WS snapshot: resetting all worktree states"
-    );
-    invalidate_agent_activity_epochs(
-        app.agent_activity_epochs.as_ref(),
-        app.worktrees.iter().map(|worktree| worktree.path.as_path()),
-    );
-    for worktree in &mut app.worktrees {
-        worktree.agent_state = None;
-    }
-    apply_agent_ws_update(app, entries, cx);
+    tracing::info!(count = entries.len(), "agent WS snapshot received");
+    app.agent_activity_sessions = entries
+        .iter()
+        .map(|entry| {
+            (entry.session_id.clone(), AgentActivitySessionRecord {
+                cwd: entry.cwd.clone(),
+                state: entry.state,
+                updated_at_unix_ms: entry.updated_at_unix_ms,
+            })
+        })
+        .collect();
+    reconcile_worktree_agent_activity(app, false, cx);
 }
 
 fn apply_agent_ws_update(
     app: &mut ArborWindow,
-    entries: &[(String, AgentState, Option<u64>)],
+    entries: &[AgentWsSessionEntry],
+    cx: &mut Context<ArborWindow>,
+) {
+    for entry in entries {
+        app.agent_activity_sessions
+            .insert(entry.session_id.clone(), AgentActivitySessionRecord {
+                cwd: entry.cwd.clone(),
+                state: entry.state,
+                updated_at_unix_ms: entry.updated_at_unix_ms,
+            });
+    }
+    reconcile_worktree_agent_activity(app, true, cx);
+}
+
+fn reconcile_worktree_agent_activity(
+    app: &mut ArborWindow,
+    allow_waiting_transitions: bool,
     cx: &mut Context<ArborWindow>,
 ) {
     let worktree_paths: Vec<PathBuf> = app.worktrees.iter().map(|w| w.path.clone()).collect();
     let allow_auto_checkpoint = app.active_outpost_index.is_none();
+    let mut derived_states = HashMap::<PathBuf, (AgentState, Option<u64>)>::new();
 
-    for (cwd, state, updated_at) in entries {
-        let cwd_path = Path::new(cwd);
-        // Find the most specific (longest) worktree path that is a prefix of this cwd.
+    for (session_id, session) in &app.agent_activity_sessions {
+        let cwd_path = Path::new(&session.cwd);
         let best_match = worktree_paths
             .iter()
             .filter(|wt_path| cwd_path.starts_with(wt_path))
             .max_by_key(|wt_path| wt_path.as_os_str().len());
 
-        if let Some(matched_path) = best_match {
-            let transition_epoch =
-                advance_agent_activity_epoch(app.agent_activity_epochs.as_ref(), matched_path);
-            let waiting_transition = if let Some(worktree) = app
-                .worktrees
-                .iter_mut()
-                .find(|worktree| &worktree.path == matched_path)
-            {
-                let previous_state = worktree.agent_state;
-                tracing::info!(
-                    cwd = %cwd,
-                    worktree = %worktree.path.display(),
-                    ?state,
-                    "agent activity matched to worktree"
-                );
-                worktree.agent_state = Some(*state);
-                if let Some(ts) = updated_at {
-                    worktree.last_activity_unix_ms =
-                        Some(worktree.last_activity_unix_ms.unwrap_or(0).max(*ts));
-                }
-                if previous_state == Some(AgentState::Working) && *state == AgentState::Waiting {
-                    Some(AgentWaitingTransitionRequest {
-                        path: worktree.path.clone(),
-                        repo_root: worktree.repo_root.clone(),
-                        agent_task: worktree.agent_task.clone(),
-                        updated_at: *updated_at,
-                        epoch: transition_epoch,
-                        allow_auto_checkpoint,
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            if let Some(request) = waiting_transition {
-                app.spawn_agent_waiting_transition(request, cx);
-            }
-        } else {
+        let Some(matched_path) = best_match else {
             tracing::warn!(
-                cwd = %cwd,
-                ?state,
+                session_id = session_id.as_str(),
+                cwd = session.cwd.as_str(),
+                state = ?session.state,
                 "agent activity did not match any worktree"
             );
+            continue;
+        };
+
+        tracing::info!(
+            session_id = session_id.as_str(),
+            cwd = session.cwd.as_str(),
+            worktree = %matched_path.display(),
+            state = ?session.state,
+            "agent activity matched to worktree"
+        );
+
+        let entry = derived_states
+            .entry(matched_path.clone())
+            .or_insert((session.state, session.updated_at_unix_ms));
+        match (entry.0, session.state) {
+            (AgentState::Waiting, AgentState::Working) => {
+                entry.1 = match (entry.1, session.updated_at_unix_ms) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    (left, right) => left.or(right),
+                };
+            },
+            (AgentState::Working, AgentState::Waiting) => {
+                *entry = (AgentState::Waiting, session.updated_at_unix_ms);
+            },
+            _ => {
+                entry.1 = match (entry.1, session.updated_at_unix_ms) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    (left, right) => left.or(right),
+                };
+            },
         }
+    }
+
+    let mut waiting_transitions = Vec::new();
+    for worktree in &mut app.worktrees {
+        let previous_state = worktree.agent_state;
+        let (next_state, updated_at) = derived_states
+            .remove(&worktree.path)
+            .map(|(state, updated_at)| (Some(state), updated_at))
+            .unwrap_or((None, None));
+
+        let transition_epoch = if previous_state != next_state {
+            Some(advance_agent_activity_epoch(
+                app.agent_activity_epochs.as_ref(),
+                &worktree.path,
+            ))
+        } else {
+            None
+        };
+
+        worktree.agent_state = next_state;
+        if let Some(ts) = updated_at {
+            worktree.last_activity_unix_ms =
+                Some(worktree.last_activity_unix_ms.unwrap_or(0).max(ts));
+        }
+
+        if allow_waiting_transitions
+            && next_state == Some(AgentState::Waiting)
+            && previous_state != Some(AgentState::Waiting)
+            && let Some(epoch) = transition_epoch
+        {
+            waiting_transitions.push(AgentWaitingTransitionRequest {
+                path: worktree.path.clone(),
+                repo_root: worktree.repo_root.clone(),
+                agent_task: worktree.agent_task.clone(),
+                updated_at,
+                epoch,
+                allow_auto_checkpoint,
+            });
+        }
+    }
+
+    for request in waiting_transitions {
+        app.spawn_agent_waiting_transition(request, cx);
     }
 }
 
@@ -5172,15 +5171,6 @@ fn advance_agent_activity_epoch(epochs: &Mutex<HashMap<PathBuf, u64>>, path: &Pa
     let next = epochs.get(path).copied().unwrap_or(0).saturating_add(1);
     epochs.insert(path.to_path_buf(), next);
     next
-}
-
-fn invalidate_agent_activity_epochs<'a>(
-    epochs: &Mutex<HashMap<PathBuf, u64>>,
-    paths: impl Iterator<Item = &'a Path>,
-) {
-    for path in paths {
-        let _ = advance_agent_activity_epoch(epochs, path);
-    }
 }
 
 fn agent_activity_epoch_is_current(
@@ -7958,10 +7948,11 @@ fn parse_terminal_backend_kind(
 
     match value.to_ascii_lowercase().as_str() {
         "embedded" => Ok(TerminalBackendKind::Embedded),
-        "alacritty" => Ok(TerminalBackendKind::Alacritty),
-        "ghostty" => Ok(TerminalBackendKind::Ghostty),
+        "alacritty" | "ghostty" => Err(format!(
+            "terminal_backend `{value}` is no longer supported; Arbor terminals are embedded-only. Using the embedded terminal instead. Configure `embedded_terminal_engine` to choose `alacritty` or `ghostty-vt-experimental`."
+        )),
         _ => Err(format!(
-            "invalid terminal_backend `{value}` in config, expected embedded/alacritty/ghostty"
+            "invalid terminal_backend `{value}` in config, expected `embedded`"
         )),
     }
 }
@@ -8014,11 +8005,11 @@ mod tests {
             auto_commit_subject, build_side_by_side_diff_lines,
             checkout::CheckoutKind,
             estimated_worktree_hover_popover_card_height, extract_first_url,
-            prioritized_pr_checks_for_display, resolve_github_access_token_from_sources,
-            styled_lines_for_session,
+            parse_terminal_backend_kind, prioritized_pr_checks_for_display,
+            resolve_github_access_token_from_sources, styled_lines_for_session,
             terminal_backend::{
-                TerminalCursor, TerminalModes, TerminalStyledCell, TerminalStyledLine,
-                TerminalStyledRun,
+                TerminalBackendKind, TerminalCursor, TerminalModes, TerminalStyledCell,
+                TerminalStyledLine, TerminalStyledRun,
             },
             terminal_daemon_http::{HttpTerminalDaemon, WebsocketConnectConfig},
             theme::ThemeKind,
@@ -8117,6 +8108,27 @@ mod tests {
             agent_task: Some("Investigating hover".to_owned()),
             last_activity_unix_ms: None,
         }
+    }
+
+    #[test]
+    fn parse_terminal_backend_defaults_to_embedded() {
+        assert_eq!(
+            parse_terminal_backend_kind(None),
+            Ok(TerminalBackendKind::Embedded),
+        );
+        assert_eq!(
+            parse_terminal_backend_kind(Some("")),
+            Ok(TerminalBackendKind::Embedded),
+        );
+    }
+
+    #[test]
+    fn parse_terminal_backend_rejects_external_backends() {
+        let alacritty = parse_terminal_backend_kind(Some("alacritty"));
+        let ghostty = parse_terminal_backend_kind(Some("ghostty"));
+
+        assert!(alacritty.is_err());
+        assert!(ghostty.is_err());
     }
 
     fn daemon_runtime_for_test() -> DaemonTerminalRuntime {
