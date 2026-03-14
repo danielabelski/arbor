@@ -4917,11 +4917,18 @@ fn apply_agent_ws_update(
     reconcile_worktree_agent_activity(app, true, cx);
 }
 
+const AGENT_ACTIVITY_SESSION_EXPIRY_SECS: u64 = 300;
+
 fn reconcile_worktree_agent_activity(
     app: &mut ArborWindow,
     allow_waiting_transitions: bool,
     cx: &mut Context<ArborWindow>,
 ) {
+    prune_stale_agent_activity_sessions(
+        &mut app.agent_activity_sessions,
+        current_unix_timestamp_millis(),
+    );
+
     let worktree_paths: Vec<PathBuf> = app.worktrees.iter().map(|w| w.path.clone()).collect();
     let allow_auto_checkpoint = app.active_outpost_index.is_none();
     let mut derived_states = HashMap::<PathBuf, (AgentState, Option<u64>)>::new();
@@ -5023,6 +5030,22 @@ fn merge_agent_activity_timestamp(current: Option<u64>, next: Option<u64>) -> Op
         (Some(left), Some(right)) => Some(left.max(right)),
         (left, right) => left.or(right),
     }
+}
+
+fn prune_stale_agent_activity_sessions(
+    sessions: &mut HashMap<String, AgentActivitySessionRecord>,
+    now_ms: Option<u64>,
+) {
+    let Some(now_ms) = now_ms else {
+        return;
+    };
+
+    let cutoff = now_ms.saturating_sub(AGENT_ACTIVITY_SESSION_EXPIRY_SECS * 1000);
+    sessions.retain(|_, session| {
+        session
+            .updated_at_unix_ms
+            .is_none_or(|updated_at_unix_ms| updated_at_unix_ms > cutoff)
+    });
 }
 
 #[derive(Clone)]
@@ -8265,6 +8288,30 @@ mod tests {
         let mut merged = (AgentState::Waiting, Some(100));
         crate::merge_agent_activity_state(&mut merged, AgentState::Working, Some(200));
         assert_eq!(merged, (AgentState::Waiting, Some(200)));
+    }
+
+    #[test]
+    fn prune_stale_agent_activity_sessions_removes_expired_entries() {
+        let now_ms = 1_000_000;
+        let mut sessions = HashMap::from([
+            ("stale".to_owned(), crate::AgentActivitySessionRecord {
+                cwd: "/tmp/repo/stale".to_owned(),
+                state: AgentState::Waiting,
+                updated_at_unix_ms: Some(
+                    now_ms - (crate::AGENT_ACTIVITY_SESSION_EXPIRY_SECS * 1000) - 1,
+                ),
+            }),
+            ("fresh".to_owned(), crate::AgentActivitySessionRecord {
+                cwd: "/tmp/repo/fresh".to_owned(),
+                state: AgentState::Working,
+                updated_at_unix_ms: Some(now_ms),
+            }),
+        ]);
+
+        crate::prune_stale_agent_activity_sessions(&mut sessions, Some(now_ms));
+
+        assert!(!sessions.contains_key("stale"));
+        assert!(sessions.contains_key("fresh"));
     }
 
     #[test]
