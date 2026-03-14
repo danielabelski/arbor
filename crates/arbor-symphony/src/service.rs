@@ -1280,13 +1280,16 @@ mod tests {
     async fn stall_detection_uses_last_activity_instead_of_start_time() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workflow_path = temp.path().join("WORKFLOW.md");
-        write_workflow(&workflow_path, 25, 100);
+        write_workflow(&workflow_path, 25, 200);
 
         let handle = SymphonyService::start(ServiceOptions {
             workflow_path: Some(workflow_path),
             runner: Arc::new(ActiveRunner {
-                events_before_finish: 8,
-                interval: Duration::from_millis(30),
+                // Keep the worker active well past the stall timeout while still
+                // emitting regular events, so the assertion does not depend on
+                // sub-100ms scheduler precision on Windows.
+                events_before_finish: 10,
+                interval: Duration::from_millis(40),
             }),
             tracker: Some(Arc::new(MockTracker {
                 issues: StdMutex::new(vec![Issue {
@@ -1303,7 +1306,7 @@ mod tests {
         .expect("service");
 
         let _ = handle.refresh();
-        tokio::time::sleep(Duration::from_millis(160)).await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
 
         let snapshot = handle.snapshot().await;
         assert_eq!(snapshot.running.len(), 1);
