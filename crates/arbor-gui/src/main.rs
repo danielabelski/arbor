@@ -7,6 +7,7 @@ mod constants;
 mod github_auth_store;
 mod github_service;
 mod graphql;
+mod issue_cache_store;
 mod log_layer;
 mod mdns_browser;
 mod notifications;
@@ -122,10 +123,12 @@ impl ArborWindow {
         let app_config_store = app_config::default_app_config_store();
         let repository_store = repository_store::default_repository_store();
         let ui_state_store = ui_state_store::default_ui_state_store();
+        let issue_cache_store = issue_cache_store::default_issue_cache_store();
         let github_auth_store = github_auth_store::default_github_auth_store();
         let github_service = github_service::default_github_service();
         let notification_service = notifications::default_notification_service();
         let loaded_github_auth_state = github_auth_store.load();
+        let loaded_issue_cache = issue_cache_store.load();
         let config_path = app_config_store.config_path();
         let cwd = match env::current_dir() {
             Ok(path) => path,
@@ -139,6 +142,13 @@ impl ArborWindow {
                     Err(error) => {
                         notice_parts.push(format!("failed to load GitHub auth state: {error}"));
                         github_auth_store::GithubAuthState::default()
+                    },
+                };
+                let startup_issue_cache = match loaded_issue_cache.clone() {
+                    Ok(cache) => cache,
+                    Err(error) => {
+                        notice_parts.push(format!("failed to load issue cache: {error}"));
+                        issue_cache_store::IssueCache::default()
                     },
                 };
 
@@ -239,6 +249,8 @@ impl ArborWindow {
                     &repositories,
                     &startup_collapsed_repository_groups,
                 );
+                let startup_issue_lists =
+                    issue_cache_store::issue_lists_from_cache(&repositories, &startup_issue_cache);
                 let (terminal_poll_tx, terminal_poll_rx) = std::sync::mpsc::channel();
 
                 let app = Self {
@@ -248,6 +260,7 @@ impl ArborWindow {
                     terminal_daemon: None,
                     daemon_base_url: DEFAULT_DAEMON_BASE_URL.to_owned(),
                     ui_state_store,
+                    issue_cache_store,
                     github_auth_store,
                     github_service,
                     github_auth_state,
@@ -363,8 +376,12 @@ impl ArborWindow {
                     last_persisted_ui_state: startup_ui_state,
                     pending_ui_state_save: None,
                     ui_state_save_in_flight: None,
+                    last_persisted_issue_cache: startup_issue_cache,
+                    pending_issue_cache_save: None,
+                    issue_cache_save_in_flight: None,
                     daemon_session_store_save: PendingSave::default(),
                     last_ui_state_error: None,
+                    last_issue_cache_error: None,
                     notification_service,
                     notifications_enabled,
                     agent_activity_sessions: HashMap::new(),
@@ -381,7 +398,7 @@ impl ArborWindow {
                     right_pane_search_active: false,
                     sidebar_order: startup_sidebar_order,
                     repository_sidebar_tabs,
-                    issue_lists: HashMap::new(),
+                    issue_lists: startup_issue_lists,
                     worktree_notes_lines: vec![String::new()],
                     worktree_notes_cursor: FileViewCursor { line: 0, col: 0 },
                     worktree_notes_path: None,
@@ -411,6 +428,7 @@ impl ArborWindow {
                     _daemon_auth_tokens_save_task: None,
                     _github_auth_state_save_task: None,
                     _ui_state_save_task: None,
+                    _issue_cache_save_task: None,
                     _daemon_session_store_save_task: None,
                     _create_modal_preview_task: None,
                     _file_tree_refresh_task: None,
@@ -459,6 +477,13 @@ impl ArborWindow {
             Err(error) => {
                 notice_parts.push(format!("failed to load GitHub auth state: {error}"));
                 github_auth_store::GithubAuthState::default()
+            },
+        };
+        let startup_issue_cache = match loaded_issue_cache {
+            Ok(cache) => cache,
+            Err(error) => {
+                notice_parts.push(format!("failed to load issue cache: {error}"));
+                issue_cache_store::IssueCache::default()
             },
         };
 
@@ -656,6 +681,8 @@ impl ArborWindow {
             &repositories,
             &startup_collapsed_repository_groups,
         );
+        let startup_issue_lists =
+            issue_cache_store::issue_lists_from_cache(&repositories, &startup_issue_cache);
         let (terminal_poll_tx, terminal_poll_rx) = std::sync::mpsc::channel();
 
         let mut app = Self {
@@ -665,6 +692,7 @@ impl ArborWindow {
             terminal_daemon,
             daemon_base_url,
             ui_state_store,
+            issue_cache_store,
             github_auth_store,
             github_service,
             github_auth_state,
@@ -792,6 +820,7 @@ impl ArborWindow {
             _daemon_auth_tokens_save_task: None,
             _github_auth_state_save_task: None,
             _ui_state_save_task: None,
+            _issue_cache_save_task: None,
             _daemon_session_store_save_task: None,
             _create_modal_preview_task: None,
             _file_tree_refresh_task: None,
@@ -809,8 +838,12 @@ impl ArborWindow {
             last_persisted_ui_state: startup_ui_state,
             pending_ui_state_save: None,
             ui_state_save_in_flight: None,
+            last_persisted_issue_cache: startup_issue_cache,
+            pending_issue_cache_save: None,
+            issue_cache_save_in_flight: None,
             daemon_session_store_save: PendingSave::default(),
             last_ui_state_error: None,
+            last_issue_cache_error: None,
             notification_service,
             notifications_enabled,
             agent_activity_sessions: HashMap::new(),
@@ -827,7 +860,7 @@ impl ArborWindow {
             right_pane_search_active: false,
             sidebar_order: startup_sidebar_order,
             repository_sidebar_tabs,
-            issue_lists: HashMap::new(),
+            issue_lists: startup_issue_lists,
             worktree_notes_lines: vec![String::new()],
             worktree_notes_cursor: FileViewCursor { line: 0, col: 0 },
             worktree_notes_path: None,
@@ -860,6 +893,7 @@ impl ArborWindow {
         };
 
         app.refresh_worktrees(cx);
+        app.refresh_cached_issue_lists_on_startup(cx);
         app.refresh_repo_config_if_changed(cx);
         app.refresh_github_auth_identity(cx);
         app.restore_terminal_sessions_from_records(initial_daemon_records, attach_daemon_runtime);
@@ -1763,6 +1797,10 @@ impl ArborWindow {
                 self.pending_ui_state_save.as_ref(),
                 self.ui_state_save_in_flight.as_ref(),
             )
+            || issue_cache_save_has_work(
+                self.pending_issue_cache_save.as_ref(),
+                self.issue_cache_save_in_flight.as_ref(),
+            )
             || self.worktree_notes_save_pending
             || self._worktree_notes_save_task.is_some()
         {
@@ -2362,6 +2400,7 @@ impl ArborWindow {
 
                     this.sync_active_repository_from_selected_worktree();
                     this.sync_visible_repository_issue_tabs(cx);
+                    this.sync_issue_cache_store(cx);
                     this.sync_pull_request_cache_store(cx);
                     this.sync_navigation_ui_state_store(cx);
 
@@ -6265,6 +6304,101 @@ fn format_relative_time(unix_ms: u64) -> String {
     }
     let days = hours / 24;
     format!("{days}d ago")
+}
+
+fn relative_time_from_rfc3339_utc(value: &str) -> Option<String> {
+    parse_rfc3339_utc_millis(value).map(format_relative_time)
+}
+
+fn parse_rfc3339_utc_millis(value: &str) -> Option<u64> {
+    let value = value.strip_suffix('Z')?;
+    let (date, time) = value.split_once('T')?;
+
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i32>().ok()?;
+    let month = date_parts.next()?.parse::<u32>().ok()?;
+    let day = date_parts.next()?.parse::<u32>().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<u32>().ok()?;
+    let minute = time_parts.next()?.parse::<u32>().ok()?;
+    let seconds_part = time_parts.next()?;
+    if time_parts.next().is_some() {
+        return None;
+    }
+
+    let (second, millis) = match seconds_part.split_once('.') {
+        Some((second, fraction)) => {
+            let second = second.parse::<u32>().ok()?;
+            let digits: String = fraction
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect();
+            if digits.is_empty() {
+                return None;
+            }
+            let millis = match digits.len() {
+                0 => 0,
+                1 => digits.parse::<u32>().ok()? * 100,
+                2 => digits.parse::<u32>().ok()? * 10,
+                _ => digits[..3].parse::<u32>().ok()?,
+            };
+            (second, millis)
+        },
+        None => (seconds_part.parse::<u32>().ok()?, 0),
+    };
+
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+
+    let days = days_from_civil_utc(year, month, day)?;
+    if days < 0 {
+        return None;
+    }
+    let seconds =
+        days as u64 * 86_400 + u64::from(hour) * 3_600 + u64::from(minute) * 60 + u64::from(second);
+    Some(
+        seconds
+            .saturating_mul(1_000)
+            .saturating_add(u64::from(millis)),
+    )
+}
+
+fn days_from_civil_utc(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    let adjust = if month <= 2 {
+        1
+    } else {
+        0
+    };
+    let shifted_year = year - adjust;
+    let era = if shifted_year >= 0 {
+        shifted_year / 400
+    } else {
+        (shifted_year - 399) / 400
+    };
+    let year_of_era = shifted_year - era * 400;
+    let shifted_month = month as i32
+        + if month > 2 {
+            -3
+        } else {
+            9
+        };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day as i32 - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(i64::from(era) * 146_097 + i64::from(day_of_era) - 719_468)
 }
 
 fn terminal_tab_title(session: &TerminalSession) -> String {
@@ -10812,6 +10946,19 @@ let answer = 42;
             ),
             None,
         );
+    }
+
+    #[test]
+    fn parse_rfc3339_utc_millis_parses_issue_timestamps() {
+        assert_eq!(
+            crate::parse_rfc3339_utc_millis("2026-03-14T20:31:45Z"),
+            Some(1_773_520_305_000)
+        );
+        assert_eq!(
+            crate::parse_rfc3339_utc_millis("2026-03-14T20:31:45.987Z"),
+            Some(1_773_520_305_987)
+        );
+        assert_eq!(crate::parse_rfc3339_utc_millis("not-a-timestamp"), None);
     }
 
     #[test]

@@ -89,6 +89,7 @@ impl ArborWindow {
             .w_full()
             .h_full()
             .overflow_y_scroll()
+            .scrollbar_width(px(10.))
             .pr_1()
             .text_sm()
             .whitespace_normal()
@@ -565,14 +566,6 @@ fn markdown_bracket_and_url_to_text(
 
 fn issue_updated_label(updated_at: &str) -> String {
     format!("updated {updated_at}")
-}
-
-fn issue_source_summary(source: &terminal_daemon_http::IssueSourceDto) -> String {
-    source
-        .url
-        .as_deref()
-        .map(|url| format!("{} · {} · {url}", source.provider, source.label))
-        .unwrap_or_else(|| format!("{} · {} · {}", source.provider, source.label, source.repository))
 }
 
 fn issue_modal_source_label(source: &terminal_daemon_http::IssueSourceDto) -> String {

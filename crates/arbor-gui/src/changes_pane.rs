@@ -7,6 +7,17 @@ impl ArborWindow {
             RightPaneTab::Procfile => self.render_procfile_content(cx),
             RightPaneTab::Notes => self.render_notes_content(cx),
         };
+        let procfile_hint = if self.right_pane_tab == RightPaneTab::Procfile {
+            match self.active_worktree() {
+                None => Some("Select a worktree to see processes."),
+                Some(worktree) if worktree.managed_processes.is_empty() => {
+                    Some("No processes yet. Procfile and arbor.toml processes are listed here.")
+                },
+                Some(_) => None,
+            }
+        } else {
+            None
+        };
         let search_active = self.right_pane_search_active;
         let search_text = self.right_pane_search.clone();
         let show_search = matches!(
@@ -23,6 +34,23 @@ impl ArborWindow {
             .flex()
             .flex_col()
             .child(self.render_right_pane_tabs(cx))
+            .when_some(procfile_hint, |this, procfile_hint| {
+                this.child(
+                    div()
+                        .id("procfile-empty-hint")
+                        .mx_1()
+                        .my(px(4.))
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.panel_bg))
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .child(procfile_hint),
+                )
+            })
             .when(show_search, |this| this.child(
                 div()
                     .id("right-pane-search")
@@ -149,11 +177,18 @@ impl ArborWindow {
                         .when_some(count, |this, count| {
                             this.child(
                                 div()
-                                    .px_1()
-                                    .py(px(0.5))
                                     .rounded_full()
-                                    .bg(rgb(theme.border))
+                                    .border_1()
+                                    .border_color(rgb(theme.border))
+                                    .bg(rgb(theme.panel_bg))
+                                    .min_w(px(14.))
+                                    .h(px(14.))
+                                    .px_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
                                     .text_size(px(10.))
+                                    .font_family(FONT_MONO)
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(theme.text_disabled))
                                     .child(count.to_string()),
@@ -554,33 +589,11 @@ impl ArborWindow {
         let theme = self.theme();
 
         let Some(worktree) = self.active_worktree().cloned() else {
-            return div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(theme.text_muted))
-                        .child("Select a worktree to see processes."),
-                );
+            return div().flex_1().min_h_0();
         };
 
         if worktree.managed_processes.is_empty() {
-            return div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(theme.text_muted))
-                        .child("No processes yet. Procfile and arbor.toml processes are listed here."),
-                );
+            return div().flex_1().min_h_0();
         }
 
         let running_count = worktree

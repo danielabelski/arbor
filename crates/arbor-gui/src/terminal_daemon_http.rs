@@ -96,7 +96,7 @@ pub struct RemoteWorktreeDto {
     pub pr_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IssueSourceDto {
     pub provider: String,
     pub label: String,
@@ -104,21 +104,21 @@ pub struct IssueSourceDto {
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueReviewKind {
     PullRequest,
     MergeRequest,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IssueReviewDto {
     pub kind: IssueReviewKind,
     pub label: String,
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IssueDto {
     pub id: String,
     pub display_id: String,

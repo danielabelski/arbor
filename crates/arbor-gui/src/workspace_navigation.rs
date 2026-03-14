@@ -62,6 +62,13 @@ impl ArborWindow {
         self.refresh_issues_for_target(target, cx);
     }
 
+    fn refresh_cached_issue_lists_on_startup(&mut self, cx: &mut Context<Self>) {
+        let targets: Vec<IssueTarget> = self.issue_lists.keys().cloned().collect();
+        for target in targets {
+            self.refresh_issues_for_target(target, cx);
+        }
+    }
+
     fn refresh_issues_for_target(&mut self, target: IssueTarget, cx: &mut Context<Self>) {
         let refresh_generation = {
             let state = self.issue_list_state_mut(&target);
@@ -78,9 +85,6 @@ impl ArborWindow {
             if state.refresh_generation != refresh_generation {
                 return;
             }
-            state.issues.clear();
-            state.source = None;
-            state.notice = None;
             state.error = Some("No daemon connection is available for this repository.".to_owned());
             state.loading = false;
             state.loaded = true;
@@ -103,56 +107,60 @@ impl ArborWindow {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
-                let state = this.issue_list_state_mut(&target);
-                if state.refresh_generation != refresh_generation {
-                    return;
+                let mut should_sync_issue_cache = false;
+                {
+                    let state = this.issue_list_state_mut(&target);
+                    if state.refresh_generation != refresh_generation {
+                        return;
+                    }
+                    state.loading = false;
+                    state.loaded = true;
+                    match response {
+                        Ok(response) => {
+                            let issue_count = response.issues.len();
+                            let issues_with_body_count = response
+                                .issues
+                                .iter()
+                                .filter(|issue| {
+                                    issue.body.as_deref().is_some_and(|body| !body.trim().is_empty())
+                                })
+                                .count();
+                            let issues_without_body_count = issue_count - issues_with_body_count;
+                            let first_issue = response
+                                .issues
+                                .first()
+                                .map(|issue| issue.display_id.as_str())
+                                .unwrap_or("none");
+                            tracing::info!(
+                                repo_root = %target.repo_root,
+                                daemon = %daemon_base_url,
+                                daemon_target = ?target.daemon_target,
+                                issue_count,
+                                issues_with_body_count,
+                                issues_without_body_count,
+                                first_issue,
+                                "loaded repository issues"
+                            );
+                            state.issues = response.issues;
+                            state.source = response.source;
+                            state.notice = response.notice;
+                            state.error = None;
+                            should_sync_issue_cache = true;
+                        },
+                        Err(error) => {
+                            tracing::warn!(
+                                repo_root = %target.repo_root,
+                                daemon = %daemon_base_url,
+                                daemon_target = ?target.daemon_target,
+                                error = %error,
+                                "failed to refresh repository issues"
+                            );
+                            state.error = Some(format!("failed to load issues: {error}"));
+                        },
+                    }
                 }
-                state.loading = false;
-                state.loaded = true;
-                match response {
-                    Ok(response) => {
-                        let issue_count = response.issues.len();
-                        let issues_with_body_count = response
-                            .issues
-                            .iter()
-                            .filter(|issue| {
-                                issue.body.as_deref().is_some_and(|body| !body.trim().is_empty())
-                            })
-                            .count();
-                        let issues_without_body_count = issue_count - issues_with_body_count;
-                        let first_issue = response
-                            .issues
-                            .first()
-                            .map(|issue| issue.display_id.as_str())
-                            .unwrap_or("none");
-                        tracing::info!(
-                            repo_root = %target.repo_root,
-                            daemon = %daemon_base_url,
-                            daemon_target = ?target.daemon_target,
-                            issue_count,
-                            issues_with_body_count,
-                            issues_without_body_count,
-                            first_issue,
-                            "loaded repository issues"
-                        );
-                        state.issues = response.issues;
-                        state.source = response.source;
-                        state.notice = response.notice;
-                        state.error = None;
-                    },
-                    Err(error) => {
-                        tracing::warn!(
-                            repo_root = %target.repo_root,
-                            daemon = %daemon_base_url,
-                            daemon_target = ?target.daemon_target,
-                            error = %error,
-                            "failed to refresh repository issues"
-                        );
-                        state.issues.clear();
-                        state.source = None;
-                        state.notice = None;
-                        state.error = Some(format!("failed to load issues: {error}"));
-                    },
+                if should_sync_issue_cache {
+                    this.sync_issue_cache_store(cx);
                 }
                 cx.notify();
             });

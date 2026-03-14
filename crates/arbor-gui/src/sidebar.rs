@@ -1989,17 +1989,12 @@ impl ArborWindow {
         let issue_error = issue_state.error.clone();
         let issue_notice = issue_state.notice.clone();
         let issue_rows = issue_state.issues.clone();
-        let source_label = issue_state
-            .source
-            .as_ref()
-            .map(issue_source_summary)
-            .unwrap_or_else(|| "Repository issues".to_owned());
         let modal_source_label = issue_state
             .source
             .as_ref()
             .map(issue_modal_source_label)
             .unwrap_or_else(|| "Issue".to_owned());
-        let mut content = div().flex().flex_col().gap_1();
+        let mut content = div().w_full().min_w_0().flex().flex_col().gap_1();
 
         if let Some(error) = issue_error.clone() {
             content = content.child(
@@ -2058,22 +2053,16 @@ impl ArborWindow {
             let issue_context = issue.clone();
             let issue_url = issue.url.clone();
             let has_issue_url = issue_url.is_some();
+            let issue_relative_updated_at = issue
+                .updated_at
+                .as_deref()
+                .and_then(relative_time_from_rfc3339_utc);
             let issue_status_color = if issue.linked_review.is_some() {
                 theme.accent
             } else if issue.linked_branch.is_some() {
                 theme.text_primary
             } else {
                 theme.text_disabled
-            };
-            let issue_status_label = if let Some(review) = issue.linked_review.as_ref() {
-                match review.kind {
-                    terminal_daemon_http::IssueReviewKind::PullRequest => "PR exists",
-                    terminal_daemon_http::IssueReviewKind::MergeRequest => "MR exists",
-                }
-            } else if issue.linked_branch.is_some() {
-                "Branch exists"
-            } else {
-                "Open"
             };
 
             content = content.child(
@@ -2084,16 +2073,9 @@ impl ArborWindow {
                     .w_full()
                     .min_w_0()
                     .cursor_pointer()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .bg(rgb(theme.panel_bg))
-                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
-                    .px_2()
-                    .py_2()
                     .flex()
-                    .items_start()
-                    .gap_2()
+                    .items_center()
+                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_issue_details_modal_for_target(
                             issue_target.clone(),
@@ -2104,258 +2086,101 @@ impl ArborWindow {
                     }))
                     .child(
                         div()
-                            .mt(px(2.))
-                            .w(px(3.))
-                            .h_full()
-                            .rounded_full()
-                            .bg(rgb(issue_status_color)),
-                    )
-                    .child(
-                        div()
                             .min_w_0()
-                            .w_full()
-                            .flex()
                             .flex_1()
-                            .flex_col()
-                            .gap(px(6.))
+                            .w_full()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.panel_bg))
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .px_2()
+                            .py(px(6.))
+                            .flex()
+                            .items_start()
+                            .gap(px(4.))
                             .child(
                                 div()
+                                    .mt(px(2.))
+                                    .w(px(3.))
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(rgb(issue_status_color)),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
                                     .w_full()
                                     .flex()
-                                    .items_start()
-                                    .justify_between()
-                                    .gap_2()
+                                    .flex_1()
+                                    .flex_col()
+                                    .gap(px(2.))
                                     .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(4.))
-                                            .child(
-                                                div()
-                                                    .when_some(
-                                                        issue_url.clone(),
-                                                        |this, issue_url| {
-                                                            this.cursor_pointer()
-                                                                .text_xs()
-                                                                .font_family(FONT_MONO)
-                                                                .font_weight(
-                                                                    FontWeight::SEMIBOLD,
-                                                                )
-                                                                .whitespace_nowrap()
-                                                                .text_color(rgb(theme.accent))
-                                                                .hover(|this| {
-                                                                    this.text_color(rgb(
-                                                                        theme.text_primary,
-                                                                    ))
-                                                                })
-                                                                .on_mouse_down(
-                                                                    MouseButton::Left,
-                                                                    cx.listener(
-                                                                        move |this, _, _, cx| {
-                                                                            this.open_external_url(
-                                                                                &issue_url,
-                                                                                cx,
-                                                                            );
-                                                                            cx.stop_propagation();
-                                                                        },
-                                                                    ),
-                                                                )
-                                                                .child(issue.display_id.clone())
-                                                        },
-                                                    )
-                                                    .when(!has_issue_url, |this| {
-                                                        this.text_xs()
-                                                            .font_family(FONT_MONO)
-                                                            .font_weight(
-                                                                FontWeight::SEMIBOLD,
-                                                            )
-                                                            .whitespace_nowrap()
-                                                            .text_color(rgb(theme.accent))
-                                                            .child(issue.display_id.clone())
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .w_full()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(rgb(theme.text_primary))
-                                                    .child(issue.title.clone()),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .rounded_full()
-                                            .border_1()
-                                            .border_color(rgb(issue_status_color))
-                                            .px(px(8.))
-                                            .py(px(3.))
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(issue_status_color))
-                                            .child(issue_status_label),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .flex_wrap()
-                                    .child(
-                                        div()
-                                            .rounded_full()
-                                            .bg(rgb(theme.panel_active_bg))
-                                            .px(px(8.))
-                                            .py(px(3.))
-                                            .text_xs()
-                                            .font_family(FONT_MONO)
-                                            .text_color(rgb(theme.text_muted))
-                                            .child(issue.suggested_worktree_name.clone()),
-                                    )
-                                    .when_some(issue.updated_at.clone(), |this, updated_at| {
-                                        this.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(theme.text_disabled))
-                                                .child(updated_at),
-                                        )
-                                    }),
-                            )
-                            .when(
-                                issue.linked_review.is_some() || issue.linked_branch.is_some(),
-                                |this| {
-                                    this.child(
                                         div()
                                             .flex()
                                             .items_center()
+                                            .justify_between()
                                             .gap_2()
-                                            .flex_wrap()
-                                            .when_some(
-                                                issue.linked_review.clone(),
-                                                |this, review| {
-                                                    let review_url = review.url.clone();
-                                                    let review_color = match review.kind {
-                                                        terminal_daemon_http::IssueReviewKind::PullRequest => theme.accent,
-                                                        terminal_daemon_http::IssueReviewKind::MergeRequest => 0x72d69c,
-                                                    };
-                                                    this.child(
-                                                        div()
-                                                            .rounded_full()
-                                                            .border_1()
-                                                            .border_color(rgb(review_color))
-                                                            .bg(rgb(theme.panel_active_bg))
-                                                            .px(px(8.))
-                                                            .py(px(3.))
-                                                            .text_xs()
-                                                            .font_weight(
-                                                                FontWeight::SEMIBOLD,
-                                                            )
-                                                            .text_color(rgb(review_color))
-                                                            .when(
-                                                                review_url.is_some(),
-                                                                |this| {
-                                                                    this.cursor_pointer()
-                                                                        .hover(|this| {
-                                                                            this.opacity(0.9)
-                                                                        })
-                                                                        .on_mouse_down(
-                                                                            MouseButton::Left,
-                                                                            cx.listener(
-                                                                                move |this,
-                                                                                      _,
-                                                                                      _,
-                                                                                      cx| {
-                                                                                    if let Some(
-                                                                                        url,
-                                                                                    ) = review_url
-                                                                                        .as_deref()
-                                                                                    {
-                                                                                        this.open_external_url(
-                                                                                            url,
-                                                                                            cx,
-                                                                                        );
-                                                                                        cx.stop_propagation();
-                                                                                    }
-                                                                                },
-                                                                            ),
-                                                                        )
-                                                                },
-                                                            )
-                                                            .child(review.label),
-                                                    )
+                                            .child(div().min_w_0().when_some(
+                                                issue_url.clone(),
+                                                |this, issue_url| {
+                                                    this.cursor_pointer()
+                                                        .text_xs()
+                                                        .font_family(FONT_MONO)
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .whitespace_nowrap()
+                                                        .text_color(rgb(theme.accent))
+                                                        .hover(|this| {
+                                                            this.text_color(rgb(
+                                                                theme.text_primary,
+                                                            ))
+                                                        })
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(move |this, _, _, cx| {
+                                                                this.open_external_url(
+                                                                    &issue_url,
+                                                                    cx,
+                                                                );
+                                                                cx.stop_propagation();
+                                                            }),
+                                                        )
+                                                        .child(issue.display_id.clone())
                                                 },
                                             )
-                                            .when_some(
-                                                issue.linked_branch.clone(),
-                                                |this, branch| {
-                                                    this.child(
-                                                        div()
-                                                            .rounded_full()
-                                                            .bg(rgb(theme.panel_active_bg))
-                                                            .px(px(8.))
-                                                            .py(px(3.))
-                                                            .text_xs()
-                                                            .font_family(FONT_MONO)
-                                                            .text_color(rgb(theme.text_primary))
-                                                            .child(branch),
-                                                    )
-                                                },
-                                            ),
+                                            .when(!has_issue_url, |this| {
+                                                this.text_xs()
+                                                    .font_family(FONT_MONO)
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .whitespace_nowrap()
+                                                    .text_color(rgb(theme.accent))
+                                                    .child(issue.display_id.clone())
+                                            }))
+                                            .when_some(issue_relative_updated_at, |this, updated_at| {
+                                                this.child(
+                                                    div()
+                                                        .flex_none()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.text_disabled))
+                                                        .child(updated_at),
+                                                )
+                                            }),
                                     )
-                                },
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .w_full()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(theme.text_primary))
+                                            .child(issue.title.clone()),
+                                    ),
                             ),
                     ),
             );
         }
 
-        div()
-            .pl(px(22.))
-            .pr_1()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_xs()
-                            .text_color(rgb(theme.text_muted))
-                            .child(source_label),
-                    )
-                    .child(
-                        div()
-                            .id(("repository-issues-refresh", repository_index))
-                            .cursor_pointer()
-                            .text_xs()
-                            .text_color(rgb(if issue_loading {
-                                theme.text_disabled
-                            } else {
-                                theme.accent
-                            }))
-                            .hover(|this| this.text_color(rgb(theme.text_primary)))
-                            .child(if issue_loading { "Loading…" } else { "Refresh" })
-                            .when(!issue_loading, |this| {
-                                this.on_click(cx.listener(move |this, _, _, cx| {
-                                    this.refresh_issues_for_target(issue_target.clone(), cx);
-                                    cx.stop_propagation();
-                                }))
-                            }),
-                    ),
-            )
-            .child(content)
+        div().w_full().min_w_0().flex().flex_1().flex_col().gap_1().child(content)
     }
 
     fn render_repository_context_menu(&mut self, cx: &mut Context<Self>) -> Div {

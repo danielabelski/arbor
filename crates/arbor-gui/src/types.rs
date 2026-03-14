@@ -142,13 +142,13 @@ struct RepositorySummary {
     github_repo_slug: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 enum ManagedDaemonTarget {
     Primary,
     Remote(usize),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct IssueTarget {
     daemon_target: ManagedDaemonTarget,
     repo_root: String,
@@ -1826,6 +1826,7 @@ struct ArborWindow {
     terminal_daemon: Option<terminal_daemon_http::SharedTerminalDaemonClient>,
     daemon_base_url: String,
     ui_state_store: Arc<dyn ui_state_store::UiStateStore>,
+    issue_cache_store: Arc<dyn issue_cache_store::IssueCacheStore>,
     github_auth_store: Arc<dyn github_auth_store::GithubAuthStore>,
     github_service: Arc<dyn github_service::GitHubService>,
     github_auth_state: github_auth_store::GithubAuthState,
@@ -1930,8 +1931,12 @@ struct ArborWindow {
     last_persisted_ui_state: ui_state_store::UiState,
     pending_ui_state_save: Option<ui_state_store::UiState>,
     ui_state_save_in_flight: Option<ui_state_store::UiState>,
+    last_persisted_issue_cache: issue_cache_store::IssueCache,
+    pending_issue_cache_save: Option<issue_cache_store::IssueCache>,
+    issue_cache_save_in_flight: Option<issue_cache_store::IssueCache>,
     daemon_session_store_save: PendingSave<Vec<DaemonSessionRecord>>,
     last_ui_state_error: Option<String>,
+    last_issue_cache_error: Option<String>,
     notification_service: Box<dyn notifications::NotificationService>,
     notifications_enabled: bool,
     agent_activity_sessions: HashMap<String, AgentActivitySessionRecord>,
@@ -1978,6 +1983,7 @@ struct ArborWindow {
     _daemon_auth_tokens_save_task: Option<gpui::Task<()>>,
     _github_auth_state_save_task: Option<gpui::Task<()>>,
     _ui_state_save_task: Option<gpui::Task<()>>,
+    _issue_cache_save_task: Option<gpui::Task<()>>,
     _daemon_session_store_save_task: Option<gpui::Task<()>>,
     _create_modal_preview_task: Option<gpui::Task<()>>,
     _file_tree_refresh_task: Option<gpui::Task<()>>,

@@ -22,6 +22,31 @@ fn next_pending_ui_state_save(
     Some(next_state.clone())
 }
 
+fn issue_cache_save_has_work(
+    pending_issue_cache_save: Option<&issue_cache_store::IssueCache>,
+    issue_cache_save_in_flight: Option<&issue_cache_store::IssueCache>,
+) -> bool {
+    pending_issue_cache_save.is_some() || issue_cache_save_in_flight.is_some()
+}
+
+fn next_pending_issue_cache_save(
+    last_persisted_issue_cache: &issue_cache_store::IssueCache,
+    pending_issue_cache_save: Option<&issue_cache_store::IssueCache>,
+    issue_cache_save_in_flight: Option<&issue_cache_store::IssueCache>,
+    next_cache: &issue_cache_store::IssueCache,
+) -> Option<issue_cache_store::IssueCache> {
+    if pending_issue_cache_save == Some(next_cache) || issue_cache_save_in_flight == Some(next_cache)
+    {
+        return pending_issue_cache_save.cloned();
+    }
+
+    if last_persisted_issue_cache == next_cache && issue_cache_save_in_flight.is_none() {
+        return None;
+    }
+
+    Some(next_cache.clone())
+}
+
 fn persisted_sidebar_selection_for_ui_state(
     current_selection: Option<ui_state_store::PersistedSidebarSelection>,
     queued_selection: Option<ui_state_store::PersistedSidebarSelection>,
@@ -359,6 +384,85 @@ impl ArborWindow {
         next_state.logs_tab_open = Some(self.logs_tab_open);
         next_state.logs_tab_active = Some(self.logs_tab_active);
         self.queue_ui_state_save(next_state, cx);
+    }
+
+    fn queued_issue_cache_base(&self) -> issue_cache_store::IssueCache {
+        self.pending_issue_cache_save
+            .clone()
+            .or_else(|| self.issue_cache_save_in_flight.clone())
+            .unwrap_or_else(|| self.last_persisted_issue_cache.clone())
+    }
+
+    fn issue_cache_snapshot(&self) -> issue_cache_store::IssueCache {
+        issue_cache_store::issue_cache_snapshot(
+            &self.repositories,
+            &self.queued_issue_cache_base(),
+            &self.issue_lists,
+        )
+    }
+
+    fn queue_issue_cache_save(
+        &mut self,
+        next_cache: issue_cache_store::IssueCache,
+        cx: &mut Context<Self>,
+    ) {
+        let queued_issue_cache_save = next_pending_issue_cache_save(
+            &self.last_persisted_issue_cache,
+            self.pending_issue_cache_save.as_ref(),
+            self.issue_cache_save_in_flight.as_ref(),
+            &next_cache,
+        );
+        let should_start_save =
+            queued_issue_cache_save.is_some() && self.issue_cache_save_in_flight.is_none();
+        self.pending_issue_cache_save = queued_issue_cache_save;
+        if !should_start_save {
+            return;
+        }
+
+        self.start_pending_issue_cache_save(cx);
+    }
+
+    fn start_pending_issue_cache_save(&mut self, cx: &mut Context<Self>) {
+        if self.issue_cache_save_in_flight.is_some() {
+            return;
+        }
+
+        let Some(next_cache) = self.pending_issue_cache_save.take() else {
+            self.maybe_finish_quit_after_persistence_flush(cx);
+            return;
+        };
+
+        self.issue_cache_save_in_flight = Some(next_cache.clone());
+        let store = self.issue_cache_store.clone();
+        let cache_to_save = next_cache.clone();
+        self._issue_cache_save_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { store.save(&cache_to_save) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.issue_cache_save_in_flight = None;
+                match result {
+                    Ok(()) => {
+                        this.last_persisted_issue_cache = next_cache.clone();
+                        this.last_issue_cache_error = None;
+                    },
+                    Err(error) => {
+                        if this.last_issue_cache_error.as_deref() != Some(error.as_str()) {
+                            this.notice = Some(format!("failed to persist issue cache: {error}"));
+                            this.last_issue_cache_error = Some(error);
+                            cx.notify();
+                        }
+                    },
+                }
+
+                this.start_pending_issue_cache_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
+            });
+        }));
+    }
+
+    fn sync_issue_cache_store(&mut self, cx: &mut Context<Self>) {
+        self.queue_issue_cache_save(self.issue_cache_snapshot(), cx);
     }
 
     fn handle_pane_divider_drag_move(
