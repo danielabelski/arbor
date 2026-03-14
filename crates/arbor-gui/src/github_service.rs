@@ -268,7 +268,7 @@ pub trait GitHubService: Send + Sync {
         token: &str,
     ) -> Result<String, String>;
 
-    fn pull_request_number(&self, repo_slug: &str, branch: &str, token: &str) -> Option<u64>;
+    fn open_pull_request_number(&self, repo_slug: &str, branch: &str, token: &str) -> Option<u64>;
 }
 
 pub struct OctocrabGitHubService;
@@ -314,7 +314,7 @@ impl GitHubService for OctocrabGitHubService {
         })
     }
 
-    fn pull_request_number(&self, repo_slug: &str, branch: &str, token: &str) -> Option<u64> {
+    fn open_pull_request_number(&self, repo_slug: &str, branch: &str, token: &str) -> Option<u64> {
         let (owner, repo_name) = repo_slug.split_once('/')?;
         let owner = owner.to_owned();
         let repo_name = repo_name.to_owned();
@@ -332,7 +332,7 @@ impl GitHubService for OctocrabGitHubService {
                 .pulls(&owner, &repo_name)
                 .list()
                 .head(format!("{owner}:{branch}"))
-                .state(octocrab::params::State::All)
+                .state(octocrab::params::State::Open)
                 .per_page(1)
                 .send()
                 .await

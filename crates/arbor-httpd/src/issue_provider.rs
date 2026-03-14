@@ -1,11 +1,13 @@
 use {
     crate::managed_worktree,
     arbor_daemon_client::{IssueDto, IssueListResponse, IssueSourceDto},
+    secrecy::{ExposeSecret, SecretString},
     serde::Deserialize,
-    std::{path::Path, time::Duration},
+    std::{collections::HashSet, env, path::Path, time::Duration},
 };
 
 const ISSUE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const GITLAB_METADATA_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const ISSUE_PAGE_SIZE: usize = 100;
 
 pub(crate) trait RepositoryIssueProvider: Send + Sync {
@@ -45,6 +47,7 @@ pub(crate) struct ResolvedIssueSource {
     repository: String,
     url: Option<String>,
     api_base_url: String,
+    gitlab_token_auth: GitLabTokenAuthPolicy,
 }
 
 impl ResolvedIssueSource {
@@ -123,6 +126,7 @@ impl RepositoryIssueProvider for GitHubIssueProvider {
             repository: repository.clone(),
             url: Some(format!("https://github.com/{repository}/issues")),
             api_base_url: "https://api.github.com".to_owned(),
+            gitlab_token_auth: GitLabTokenAuthPolicy::Disabled,
         })
     }
 
@@ -146,8 +150,11 @@ impl RepositoryIssueProvider for GitHubIssueProvider {
             let mut request = ureq::get(&url)
                 .header("Accept", "application/json")
                 .header("User-Agent", "Arbor");
-            if let Some(token) = token.as_deref() {
-                request = request.header("Authorization", &format!("Bearer {token}"));
+            if let Some(token) = token.as_ref() {
+                request = request.header(
+                    "Authorization",
+                    &format!("Bearer {}", token.expose_secret()),
+                );
             }
 
             let mut response = request
@@ -211,11 +218,12 @@ impl RepositoryIssueProvider for GitLabIssueProvider {
         origin_remote_url: &str,
     ) -> Option<ResolvedIssueSource> {
         let remote = parse_remote(origin_remote_url)?;
-        resolve_gitlab_source(&remote, gitlab_instance_supports_issues)
+        let trusted_hosts = gitlab_trusted_hosts_from_env();
+        resolve_gitlab_source(&remote, gitlab_instance_supports_issues, &trusted_hosts)
     }
 
     fn list_issues(&self, source: &ResolvedIssueSource) -> Result<Vec<IssueDto>, String> {
-        let token = gitlab_access_token_from_env();
+        let token = gitlab_access_token_for_source(source);
         let mut issues = Vec::new();
         let mut page = 1usize;
 
@@ -229,8 +237,8 @@ impl RepositoryIssueProvider for GitLabIssueProvider {
             let mut request = ureq::get(&url)
                 .header("Accept", "application/json")
                 .header("User-Agent", "Arbor");
-            if let Some(token) = token.as_deref() {
-                request = request.header("PRIVATE-TOKEN", token);
+            if let Some(token) = token.as_ref() {
+                request = request.header("PRIVATE-TOKEN", token.expose_secret());
             }
 
             let mut response = request
@@ -332,6 +340,12 @@ enum RemoteHostKind {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitLabTokenAuthPolicy {
+    Disabled,
+    Enabled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteSpec {
     scheme: RemoteScheme,
@@ -343,6 +357,10 @@ struct RemoteSpec {
 impl RemoteSpec {
     fn base_url(&self) -> String {
         format!("{}://{}", self.scheme.as_str(), self.host)
+    }
+
+    fn host_name(&self) -> Option<&str> {
+        authority_host_name(&self.host)
     }
 }
 
@@ -479,14 +497,37 @@ fn strip_port_from_authority(authority: &str) -> Option<String> {
 }
 
 fn classify_remote_host(host: &str) -> RemoteHostKind {
-    let host_without_port = host
-        .strip_prefix('[')
-        .and_then(|value| value.split_once(']').map(|(bare_host, _)| bare_host))
-        .unwrap_or_else(|| host.split(':').next().unwrap_or(host));
-    match host_without_port.to_ascii_lowercase().as_str() {
+    match authority_host_name(host)
+        .unwrap_or(host)
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "github.com" => RemoteHostKind::GitHub,
         "gitlab.com" => RemoteHostKind::GitLab,
         _ => RemoteHostKind::Other,
+    }
+}
+
+fn authority_host_name(authority: &str) -> Option<&str> {
+    let trimmed = authority.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let (host, _) = rest.split_once(']')?;
+        return (!host.is_empty()).then_some(host);
+    }
+
+    match trimmed.rsplit_once(':') {
+        Some((host, port))
+            if !host.is_empty()
+                && !port.is_empty()
+                && port.chars().all(|character| character.is_ascii_digit()) =>
+        {
+            Some(host)
+        },
+        _ => Some(trimmed),
     }
 }
 
@@ -548,6 +589,7 @@ fn github_repo_slug(remote: &RemoteSpec) -> Option<String> {
 fn resolve_gitlab_source<F>(
     remote: &RemoteSpec,
     supports_custom_instance: F,
+    trusted_hosts: &HashSet<String>,
 ) -> Option<ResolvedIssueSource>
 where
     F: FnOnce(&RemoteSpec) -> bool,
@@ -567,6 +609,7 @@ where
         repository: remote.path.clone(),
         url: Some(format!("{base_url}/{}/-/issues", remote.path)),
         api_base_url: format!("{base_url}/api/v4"),
+        gitlab_token_auth: gitlab_token_auth_policy(remote, trusted_hosts),
     })
 }
 
@@ -576,7 +619,7 @@ fn gitlab_instance_supports_issues(remote: &RemoteSpec) -> bool {
         .header("Accept", "application/json")
         .header("User-Agent", "Arbor")
         .config()
-        .timeout_global(Some(ISSUE_REQUEST_TIMEOUT))
+        .timeout_global(Some(GITLAB_METADATA_PROBE_TIMEOUT))
         .build()
         .call()
     {
@@ -600,17 +643,76 @@ fn gitlab_instance_supports_issues(remote: &RemoteSpec) -> bool {
     !metadata.version.trim().is_empty()
 }
 
-fn github_access_token_from_env() -> Option<String> {
-    std::env::var("GITHUB_TOKEN")
-        .ok()
-        .and_then(|value| non_empty_trimmed_str(&value).map(str::to_owned))
+fn gitlab_token_auth_policy(
+    remote: &RemoteSpec,
+    trusted_hosts: &HashSet<String>,
+) -> GitLabTokenAuthPolicy {
+    if remote.scheme != RemoteScheme::Https {
+        return GitLabTokenAuthPolicy::Disabled;
+    }
+
+    match remote.host_kind {
+        RemoteHostKind::GitLab => GitLabTokenAuthPolicy::Enabled,
+        RemoteHostKind::Other => remote
+            .host_name()
+            .map(|host| trusted_hosts.contains(&host.to_ascii_lowercase()))
+            .map(|trusted| {
+                if trusted {
+                    GitLabTokenAuthPolicy::Enabled
+                } else {
+                    GitLabTokenAuthPolicy::Disabled
+                }
+            })
+            .unwrap_or(GitLabTokenAuthPolicy::Disabled),
+        RemoteHostKind::GitHub => GitLabTokenAuthPolicy::Disabled,
+    }
 }
 
-fn gitlab_access_token_from_env() -> Option<String> {
-    std::env::var("GITLAB_TOKEN")
+fn gitlab_access_token_for_source(source: &ResolvedIssueSource) -> Option<SecretString> {
+    match source.gitlab_token_auth {
+        GitLabTokenAuthPolicy::Enabled => gitlab_access_token_from_env(),
+        GitLabTokenAuthPolicy::Disabled => None,
+    }
+}
+
+fn github_access_token_from_env() -> Option<SecretString> {
+    env::var("GITHUB_TOKEN")
         .ok()
-        .or_else(|| std::env::var("ARBOR_GITLAB_TOKEN").ok())
-        .and_then(|value| non_empty_trimmed_str(&value).map(str::to_owned))
+        .and_then(|value| non_empty_trimmed_str(&value).map(SecretString::from))
+}
+
+fn gitlab_access_token_from_env() -> Option<SecretString> {
+    env::var("GITLAB_TOKEN")
+        .ok()
+        .or_else(|| env::var("ARBOR_GITLAB_TOKEN").ok())
+        .and_then(|value| non_empty_trimmed_str(&value).map(SecretString::from))
+}
+
+fn gitlab_trusted_hosts_from_env() -> HashSet<String> {
+    ["ARBOR_GITLAB_TRUSTED_HOSTS", "GITLAB_TRUSTED_HOSTS"]
+        .into_iter()
+        .filter_map(|name| env::var(name).ok())
+        .flat_map(|value| {
+            value
+                .split(',')
+                .filter_map(normalize_trusted_gitlab_host)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn normalize_trusted_gitlab_host(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+    authority_host_name(authority).map(|host| host.to_ascii_lowercase())
 }
 
 fn non_empty_trimmed_str(value: &str) -> Option<&str> {
@@ -712,7 +814,7 @@ mod tests {
         let remote = parse_remote("https://code.company.com/group/arbor.git")
             .unwrap_or_else(|| panic!("remote should parse"));
 
-        let source = resolve_gitlab_source(&remote, |_| true)
+        let source = resolve_gitlab_source(&remote, |_| true, &HashSet::new())
             .unwrap_or_else(|| panic!("custom GitLab instance should resolve"));
 
         assert_eq!(source.provider, IssueProviderKind::GitLab);
@@ -722,6 +824,7 @@ mod tests {
             Some("https://code.company.com/group/arbor/-/issues")
         );
         assert_eq!(source.api_base_url, "https://code.company.com/api/v4");
+        assert_eq!(source.gitlab_token_auth, GitLabTokenAuthPolicy::Disabled);
     }
 
     #[test]
@@ -729,7 +832,56 @@ mod tests {
         let remote = parse_remote("git@github.com:penso/arbor.git")
             .unwrap_or_else(|| panic!("remote should parse"));
 
-        assert_eq!(resolve_gitlab_source(&remote, |_| true), None);
+        assert_eq!(
+            resolve_gitlab_source(&remote, |_| true, &HashSet::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_gitlab_source_allows_token_auth_for_gitlab_dot_com_https() {
+        let remote = parse_remote("https://gitlab.com/group/arbor.git")
+            .unwrap_or_else(|| panic!("remote should parse"));
+
+        let source = resolve_gitlab_source(&remote, |_| true, &HashSet::new())
+            .unwrap_or_else(|| panic!("gitlab.com should resolve"));
+
+        assert_eq!(source.gitlab_token_auth, GitLabTokenAuthPolicy::Enabled);
+    }
+
+    #[test]
+    fn resolve_gitlab_source_disables_token_auth_for_plain_http_remotes() {
+        let remote = parse_remote("http://gitlab.example.com/group/arbor.git")
+            .unwrap_or_else(|| panic!("remote should parse"));
+
+        let source = resolve_gitlab_source(&remote, |_| true, &HashSet::new())
+            .unwrap_or_else(|| panic!("GitLab http remote should still resolve"));
+
+        assert_eq!(source.gitlab_token_auth, GitLabTokenAuthPolicy::Disabled);
+    }
+
+    #[test]
+    fn resolve_gitlab_source_allows_token_auth_for_trusted_custom_hosts() {
+        let remote = parse_remote("https://code.company.com/group/arbor.git")
+            .unwrap_or_else(|| panic!("remote should parse"));
+        let trusted_hosts = HashSet::from([String::from("code.company.com")]);
+
+        let source = resolve_gitlab_source(&remote, |_| true, &trusted_hosts)
+            .unwrap_or_else(|| panic!("trusted custom GitLab instance should resolve"));
+
+        assert_eq!(source.gitlab_token_auth, GitLabTokenAuthPolicy::Enabled);
+    }
+
+    #[test]
+    fn normalize_trusted_gitlab_host_accepts_urls_and_ports() {
+        assert_eq!(
+            normalize_trusted_gitlab_host("https://gitlab.example.com:8443/group/arbor"),
+            Some("gitlab.example.com".to_owned())
+        );
+        assert_eq!(
+            normalize_trusted_gitlab_host("code.company.com"),
+            Some("code.company.com".to_owned())
+        );
     }
 
     #[test]

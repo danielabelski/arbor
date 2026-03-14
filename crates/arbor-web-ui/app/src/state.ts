@@ -33,6 +33,7 @@ export type AppState = {
   issuesError: string | null;
   issuesRepoRoot: string | null;
   issuesLoadedRepoRoot: string | null;
+  issuesRequestGeneration: number;
   rightPanelTab: RightPanelTab;
 
   selectedRepoRoot: string | null;
@@ -58,6 +59,7 @@ export function createInitialState(): AppState {
     issuesError: null,
     issuesRepoRoot: null,
     issuesLoadedRepoRoot: null,
+    issuesRequestGeneration: 0,
     rightPanelTab: "changes",
     selectedRepoRoot: null,
     selectedWorktreePath: null,
@@ -194,6 +196,7 @@ export async function refresh(): Promise<void> {
             issuesLoading: false,
             issuesRepoRoot: nextIssuesRepoRoot,
             issuesLoadedRepoRoot: null,
+            issuesRequestGeneration: state.issuesRequestGeneration,
           }
         : {}),
       loading: false,
@@ -271,6 +274,7 @@ export function selectWorktree(path: string | null): void {
           issuesLoading: false,
           issuesRepoRoot: nextIssuesRepoRoot,
           issuesLoadedRepoRoot: null,
+          issuesRequestGeneration: state.issuesRequestGeneration,
         }
       : {}),
   });
@@ -325,6 +329,7 @@ export function refreshIssues(
       issuesLoading: false,
       issuesRepoRoot: null,
       issuesLoadedRepoRoot: null,
+      issuesRequestGeneration: state.issuesRequestGeneration,
     });
     return;
   }
@@ -333,16 +338,21 @@ export function refreshIssues(
     return;
   }
 
+  const requestGeneration = state.issuesRequestGeneration + 1;
   updateState({
     issuesLoading: true,
     issuesError: null,
     issuesNotice: null,
     issuesRepoRoot: repoRoot,
+    issuesRequestGeneration: requestGeneration,
   });
 
   fetchIssues(repoRoot)
     .then((response) => {
-      if (selectedIssueRepoRoot() !== repoRoot) {
+      if (
+        selectedIssueRepoRoot() !== repoRoot ||
+        state.issuesRequestGeneration !== requestGeneration
+      ) {
         return;
       }
       updateState({
@@ -353,10 +363,14 @@ export function refreshIssues(
         issuesLoading: false,
         issuesRepoRoot: repoRoot,
         issuesLoadedRepoRoot: repoRoot,
+        issuesRequestGeneration: requestGeneration,
       });
     })
     .catch((error) => {
-      if (selectedIssueRepoRoot() !== repoRoot) {
+      if (
+        selectedIssueRepoRoot() !== repoRoot ||
+        state.issuesRequestGeneration !== requestGeneration
+      ) {
         return;
       }
       updateState({
@@ -367,6 +381,7 @@ export function refreshIssues(
         issuesLoading: false,
         issuesRepoRoot: repoRoot,
         issuesLoadedRepoRoot: repoRoot,
+        issuesRequestGeneration: requestGeneration,
       });
     });
 }

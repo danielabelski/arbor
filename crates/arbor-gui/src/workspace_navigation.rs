@@ -63,6 +63,11 @@ impl ArborWindow {
     }
 
     fn refresh_issues_for_target(&mut self, target: IssueTarget, cx: &mut Context<Self>) {
+        let refresh_generation = {
+            let state = self.issue_list_state_mut(&target);
+            state.refresh_generation = state.refresh_generation.wrapping_add(1);
+            state.refresh_generation
+        };
         let Some(client) = self.daemon_client_for_target(&target) else {
             tracing::warn!(
                 repo_root = %target.repo_root,
@@ -70,6 +75,9 @@ impl ArborWindow {
                 "failed to refresh repository issues: no daemon connection is available"
             );
             let state = self.issue_list_state_mut(&target);
+            if state.refresh_generation != refresh_generation {
+                return;
+            }
             state.issues.clear();
             state.source = None;
             state.notice = None;
@@ -96,6 +104,9 @@ impl ArborWindow {
 
             let _ = this.update(cx, |this, cx| {
                 let state = this.issue_list_state_mut(&target);
+                if state.refresh_generation != refresh_generation {
+                    return;
+                }
                 state.loading = false;
                 state.loaded = true;
                 match response {
@@ -730,12 +741,35 @@ impl ArborWindow {
     }
 
     fn persist_repositories(&mut self, cx: &mut Context<Self>) {
-        let entries_to_save =
-            repository_store::repository_entries_from_summaries(&self.repositories);
-        if let Err(error) = self.repository_store.save_entries(&entries_to_save) {
-            self.notice = Some(format!("failed to save repositories: {error}"));
-            cx.notify();
-        }
+        self.repository_entries_save
+            .queue(repository_store::repository_entries_from_summaries(
+                &self.repositories,
+            ));
+        self.start_pending_repository_entries_save(cx);
+    }
+
+    fn start_pending_repository_entries_save(&mut self, cx: &mut Context<Self>) {
+        let Some(entries) = self.repository_entries_save.begin_next() else {
+            self.maybe_finish_quit_after_persistence_flush(cx);
+            return;
+        };
+
+        let store = self.repository_store.clone();
+        self._repository_entries_save_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { store.save_entries(&entries) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.repository_entries_save.finish();
+                if let Err(error) = result {
+                    this.notice = Some(format!("failed to save repositories: {error}"));
+                    cx.notify();
+                }
+
+                this.start_pending_repository_entries_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
+            });
+        }));
     }
 
     fn add_repository_from_path(&mut self, selected_path: PathBuf, cx: &mut Context<Self>) {
@@ -845,11 +879,7 @@ impl ArborWindow {
 
                 this.github_auth_state.user_login = Some(login);
                 this.github_auth_state.user_avatar_url = avatar_url;
-                if let Err(error) = this.persist_github_auth_state() {
-                    this.notice = Some(format!(
-                        "GitHub identity refreshed, but failed to persist auth state: {error}"
-                    ));
-                }
+                this.persist_github_auth_state(cx);
                 cx.notify();
             });
         })
@@ -860,8 +890,31 @@ impl ArborWindow {
         resolve_github_access_token(self.github_auth_state.access_token.as_deref())
     }
 
-    fn persist_github_auth_state(&self) -> Result<(), String> {
-        self.github_auth_store.save(&self.github_auth_state)
+    fn persist_github_auth_state(&mut self, cx: &mut Context<Self>) {
+        self.github_auth_state_save.queue(self.github_auth_state.clone());
+        self.start_pending_github_auth_state_save(cx);
+    }
+
+    fn start_pending_github_auth_state_save(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.github_auth_state_save.begin_next() else {
+            self.maybe_finish_quit_after_persistence_flush(cx);
+            return;
+        };
+
+        let store = self.github_auth_store.clone();
+        self._github_auth_state_save_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { store.save(&state) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.github_auth_state_save.finish();
+                if let Err(error) = result {
+                    this.notice = Some(format!("failed to persist GitHub auth state: {error}"));
+                    cx.notify();
+                }
+
+                this.start_pending_github_auth_state_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
+            });
+        }));
     }
 
     fn clear_saved_github_token(&mut self, cx: &mut Context<Self>) {
@@ -872,12 +925,8 @@ impl ArborWindow {
         }
 
         self.github_auth_state = github_auth_store::GithubAuthState::default();
-        self.notice = match self.persist_github_auth_state() {
-            Ok(()) => Some("disconnected from GitHub".to_owned()),
-            Err(error) => Some(format!(
-                "disconnected, but failed to persist auth state: {error}"
-            )),
-        };
+        self.persist_github_auth_state(cx);
+        self.notice = Some("disconnected from GitHub".to_owned());
         self.refresh_worktree_pull_requests(cx);
         cx.notify();
     }
@@ -979,15 +1028,11 @@ impl ArborWindow {
                             user_avatar_url: identity.and_then(|(_, avatar_url)| avatar_url),
                         };
 
-                        this.notice = match this.persist_github_auth_state() {
-                            Ok(()) => Some(
-                                "GitHub connected, pull request numbers will refresh automatically"
-                                    .to_owned(),
-                            ),
-                            Err(error) => Some(format!(
-                                "GitHub connected, but failed to persist auth state: {error}"
-                            )),
-                        };
+                        this.persist_github_auth_state(cx);
+                        this.notice = Some(
+                            "GitHub connected, pull request numbers will refresh automatically"
+                                .to_owned(),
+                        );
                         this.refresh_worktree_pull_requests(cx);
                     },
                     Err(error) => {
@@ -1005,9 +1050,28 @@ impl ArborWindow {
         self.top_bar_quick_actions_submenu = None;
     }
 
-    fn refresh_top_bar_external_launchers(&mut self) {
-        self.ide_launchers = detect_ide_launchers();
-        self.terminal_launchers = detect_terminal_launchers();
+    fn refresh_top_bar_external_launchers(&mut self, cx: &mut Context<Self>) {
+        let next_epoch = self.launcher_refresh_epoch.wrapping_add(1);
+        self.launcher_refresh_epoch = next_epoch;
+        self._launcher_refresh_task = Some(cx.spawn(async move |this, cx| {
+            let (ide_launchers, terminal_launchers) = cx
+                .background_spawn(async move {
+                    (detect_ide_launchers(), detect_terminal_launchers())
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                if this.launcher_refresh_epoch != next_epoch {
+                    return;
+                }
+
+                this.ide_launchers = ide_launchers;
+                this.terminal_launchers = terminal_launchers;
+                if this.top_bar_quick_actions_open {
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn toggle_top_bar_worktree_quick_actions_menu(&mut self, cx: &mut Context<Self>) {
@@ -1023,7 +1087,7 @@ impl ArborWindow {
         } else {
             self.top_bar_quick_actions_open = true;
             self.top_bar_quick_actions_submenu = None;
-            self.refresh_top_bar_external_launchers();
+            self.refresh_top_bar_external_launchers(cx);
         }
         cx.notify();
     }

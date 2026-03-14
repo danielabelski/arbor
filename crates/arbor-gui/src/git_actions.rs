@@ -880,7 +880,9 @@ fn run_create_pr_for_worktree(
     let token = resolve_github_access_token(github_token)
         .ok_or_else(|| "GitHub authentication required, click GitHub Sign in first".to_owned())?;
 
-    if let Some(existing_pr_number) = github_service.pull_request_number(&slug, &branch, &token) {
+    if let Some(existing_pr_number) =
+        github_service.open_pull_request_number(&slug, &branch, &token)
+    {
         return Err(format!(
             "pull request already exists: {}",
             github_pr_url(&slug, existing_pr_number)

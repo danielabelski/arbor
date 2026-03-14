@@ -145,6 +145,7 @@ struct IssueListState {
     error: Option<String>,
     loading: bool,
     loaded: bool,
+    refresh_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1955,6 +1956,7 @@ struct ArborWindow {
     worktree_refresh_epoch: u64,
     config_refresh_epoch: u64,
     repo_metadata_refresh_epoch: u64,
+    launcher_refresh_epoch: u64,
     last_mouse_position: gpui::Point<Pixels>,
     outpost_context_menu: Option<OutpostContextMenu>,
     discovered_daemons: Vec<mdns_browser::DiscoveredDaemon>,
