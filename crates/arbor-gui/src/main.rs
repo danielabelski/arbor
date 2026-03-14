@@ -310,6 +310,7 @@ impl ArborWindow {
                     show_about: false,
                     show_theme_picker: false,
                     theme_picker_selected_index: theme_picker_index_for_kind(theme_kind),
+                    theme_picker_scroll_handle: ScrollHandle::new(),
                     settings_modal: None,
                     daemon_auth_modal: None,
                     pending_remote_daemon_auth: None,
@@ -712,6 +713,7 @@ impl ArborWindow {
             show_about: false,
             show_theme_picker: false,
             theme_picker_selected_index: theme_picker_index_for_kind(theme_kind),
+            theme_picker_scroll_handle: ScrollHandle::new(),
             settings_modal: None,
             daemon_auth_modal: None,
             pending_remote_daemon_auth: None,
@@ -3159,11 +3161,17 @@ impl ArborWindow {
                     cx.stop_propagation();
                 },
                 "up" => {
-                    self.move_theme_picker_selection(-(theme_picker_columns() as isize), cx);
+                    self.move_theme_picker_selection(
+                        -(theme_picker_columns(ThemeKind::ALL.len()) as isize),
+                        cx,
+                    );
                     cx.stop_propagation();
                 },
                 "down" => {
-                    self.move_theme_picker_selection(theme_picker_columns() as isize, cx);
+                    self.move_theme_picker_selection(
+                        theme_picker_columns(ThemeKind::ALL.len()) as isize,
+                        cx,
+                    );
                     cx.stop_propagation();
                 },
                 "enter" | "return" => {
