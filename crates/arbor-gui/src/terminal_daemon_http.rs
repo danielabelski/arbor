@@ -182,12 +182,30 @@ struct SetBindModeRequest {
 
 // ── Agent chat DTOs ──────────────────────────────────────────────────
 
+/// Transport used by an agent chat session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum AgentChatTransport {
+    /// ACP agent via acpx CLI subprocess.
+    Acp,
+    /// OpenAI-compatible HTTP API.
+    OpenAiChat {
+        base_url: String,
+        api_key: Option<String>,
+    },
+}
+
 #[derive(Debug, Serialize)]
 struct AgentChatCreateRequest {
     workspace_path: String,
     agent_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     initial_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport: Option<AgentChatTransport>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,6 +221,25 @@ pub struct AgentChatSessionSummary {
     pub status: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct DiscoverModelsRequest {
+    base_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
+}
+
+/// A model discovered from an OpenAI-compatible `/v1/models` endpoint.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiscoveredModelDto {
+    pub id: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoverModelsResponse {
+    models: Vec<DiscoveredModelDto>,
 }
 
 #[derive(Debug, Serialize)]
@@ -542,11 +579,15 @@ impl HttpTerminalDaemon {
         workspace_path: &str,
         agent_kind: &str,
         initial_prompt: Option<&str>,
+        model_id: Option<&str>,
+        transport: Option<AgentChatTransport>,
     ) -> Result<AgentChatCreateResponse, HttpTerminalDaemonError> {
         let payload = AgentChatCreateRequest {
             workspace_path: workspace_path.to_owned(),
             agent_kind: agent_kind.to_owned(),
             initial_prompt: initial_prompt.map(str::to_owned),
+            model_id: model_id.map(str::to_owned),
+            transport,
         };
         let response =
             self.send_json("POST", &format!("{API_PATH_PREFIX}/agent/chat"), &payload)?;
@@ -591,6 +632,25 @@ impl HttpTerminalDaemon {
             &format!("{API_PATH_PREFIX}/agent/chat/{encoded}/cancel"),
         )?;
         self.expect_status(response, &[200])
+    }
+
+    /// Probe an OpenAI-compatible provider's `/v1/models` endpoint via the daemon.
+    pub fn discover_models(
+        &self,
+        base_url: &str,
+        api_key: Option<&str>,
+    ) -> Result<Vec<DiscoveredModelDto>, HttpTerminalDaemonError> {
+        let payload = DiscoverModelsRequest {
+            base_url: base_url.to_owned(),
+            api_key: api_key.map(str::to_owned),
+        };
+        let response = self.send_json(
+            "POST",
+            &format!("{API_PATH_PREFIX}/agent/chat/discover-models"),
+            &payload,
+        )?;
+        let result: DiscoverModelsResponse = self.decode_json_response(response, &[200])?;
+        Ok(result.models)
     }
 
     #[allow(dead_code)]
@@ -820,6 +880,8 @@ pub trait TerminalDaemonClient: Send + Sync + fmt::Debug {
         workspace_path: &str,
         agent_kind: &str,
         initial_prompt: Option<&str>,
+        model_id: Option<&str>,
+        transport: Option<AgentChatTransport>,
     ) -> Result<AgentChatCreateResponse, HttpTerminalDaemonError>;
     fn list_agent_chats(&self) -> Result<Vec<AgentChatSessionSummary>, HttpTerminalDaemonError>;
     fn kill_agent_chat(&self, session_id: &str) -> Result<(), HttpTerminalDaemonError>;
@@ -829,6 +891,11 @@ pub trait TerminalDaemonClient: Send + Sync + fmt::Debug {
         message: &str,
     ) -> Result<(), HttpTerminalDaemonError>;
     fn cancel_agent_chat(&self, session_id: &str) -> Result<(), HttpTerminalDaemonError>;
+    fn discover_models(
+        &self,
+        base_url: &str,
+        api_key: Option<&str>,
+    ) -> Result<Vec<DiscoveredModelDto>, HttpTerminalDaemonError>;
 }
 
 impl TerminalDaemonClient for HttpTerminalDaemon {
@@ -948,8 +1015,17 @@ impl TerminalDaemonClient for HttpTerminalDaemon {
         workspace_path: &str,
         agent_kind: &str,
         initial_prompt: Option<&str>,
+        model_id: Option<&str>,
+        transport: Option<AgentChatTransport>,
     ) -> Result<AgentChatCreateResponse, HttpTerminalDaemonError> {
-        HttpTerminalDaemon::create_agent_chat(self, workspace_path, agent_kind, initial_prompt)
+        HttpTerminalDaemon::create_agent_chat(
+            self,
+            workspace_path,
+            agent_kind,
+            initial_prompt,
+            model_id,
+            transport,
+        )
     }
 
     fn list_agent_chats(&self) -> Result<Vec<AgentChatSessionSummary>, HttpTerminalDaemonError> {
@@ -970,6 +1046,14 @@ impl TerminalDaemonClient for HttpTerminalDaemon {
 
     fn cancel_agent_chat(&self, session_id: &str) -> Result<(), HttpTerminalDaemonError> {
         HttpTerminalDaemon::cancel_agent_chat(self, session_id)
+    }
+
+    fn discover_models(
+        &self,
+        base_url: &str,
+        api_key: Option<&str>,
+    ) -> Result<Vec<DiscoveredModelDto>, HttpTerminalDaemonError> {
+        HttpTerminalDaemon::discover_models(self, base_url, api_key)
     }
 }
 

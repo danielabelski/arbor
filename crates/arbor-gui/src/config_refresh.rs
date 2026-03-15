@@ -13,6 +13,7 @@ impl ArborWindow {
             daemon_connection_refused: bool,
             remote_hosts: Vec<arbor_core::outpost::RemoteHost>,
             agent_presets: Vec<AgentPreset>,
+            configured_providers: Vec<ConfiguredProvider>,
             notifications_enabled: bool,
             notices: Vec<String>,
         }
@@ -132,6 +133,9 @@ impl ArborWindow {
                         daemon_connection_refused,
                         remote_hosts,
                         agent_presets: normalize_agent_presets(&loaded.config.agent_presets),
+                        configured_providers: load_configured_providers(
+                            &loaded.config.providers,
+                        ),
                         notifications_enabled: loaded.config.notifications.unwrap_or(true),
                         notices,
                     })
@@ -208,6 +212,10 @@ impl ArborWindow {
                     }
                     changed = true;
                 }
+
+                // Refresh configured providers from config.toml [[providers]]
+                this.configured_providers = outcome.configured_providers;
+                this.probe_provider_models(cx);
 
                 if this.notifications_enabled != outcome.notifications_enabled {
                     this.notifications_enabled = outcome.notifications_enabled;

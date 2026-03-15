@@ -66,7 +66,7 @@ pub(crate) fn command_for_execution_mode(
                 tokens.push("--yolo".to_owned());
             },
         },
-        AgentPresetKind::Pi | AgentPresetKind::OpenCode => {},
+        _ => {},
     }
 
     Ok(join_shell_tokens(&tokens))
@@ -100,7 +100,7 @@ pub(crate) fn build_prompt_execution_plan(
             AgentPresetKind::Copilot => {
                 format!("{configured_command} -p {} -s", shell_quote(prompt))
             },
-            AgentPresetKind::Pi => {
+            _ => {
                 return Err(PromptError::Execution(format!(
                     "{} does not support non-interactive prompt execution yet",
                     preset.label()
@@ -195,7 +195,7 @@ pub(crate) fn strip_execution_mode_flags(preset: AgentPresetKind, tokens: &mut V
                 ("--allow-all-urls", false),
             ]);
         },
-        AgentPresetKind::Pi | AgentPresetKind::OpenCode => {},
+        _ => {},
     }
 }
 

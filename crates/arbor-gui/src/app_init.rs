@@ -129,6 +129,8 @@ impl ArborWindow {
                     })
                     .collect();
                 let agent_presets = normalize_agent_presets(&loaded_config.config.agent_presets);
+                let configured_providers =
+                    load_configured_providers(&loaded_config.config.providers);
                 let outpost_store = Arc::new(arbor_core::outpost_store::default_outpost_store());
                 let outposts = load_outpost_summaries(outpost_store.as_ref(), &remote_hosts);
                 let active_outpost_index = persisted_sidebar_selection_outpost_index(
@@ -238,6 +240,7 @@ impl ArborWindow {
                     manage_hosts_modal: None,
                     manage_presets_modal: None,
                     agent_presets,
+                    configured_providers,
                     active_preset_tab: None,
                     repo_presets: Vec::new(),
                     manage_repo_presets_modal: None,
@@ -319,6 +322,9 @@ impl ArborWindow {
                     next_agent_chat_id: 1,
                     agent_chat_scroll_handle: ScrollHandle::new(),
                     agent_selector_open_for: None,
+                    agent_selector_search: String::new(),
+                    agent_selector_search_cursor: 0,
+                    chat_mode_selector_open_for: None,
                     center_tab_order: Vec::new(),
                     new_tab_menu_position: None,
                     repository_context_menu: None,
@@ -537,6 +543,7 @@ impl ArborWindow {
             })
             .collect();
         let agent_presets = normalize_agent_presets(&loaded_config.config.agent_presets);
+        let configured_providers = load_configured_providers(&loaded_config.config.providers);
 
         let outpost_store = Arc::new(arbor_core::outpost_store::default_outpost_store());
         let outposts = load_outpost_summaries(outpost_store.as_ref(), &remote_hosts);
@@ -678,6 +685,7 @@ impl ArborWindow {
             manage_hosts_modal: None,
             manage_presets_modal: None,
             agent_presets,
+            configured_providers,
             active_preset_tab: None,
             repo_presets: Vec::new(),
             manage_repo_presets_modal: None,
@@ -721,6 +729,9 @@ impl ArborWindow {
             next_agent_chat_id: 1,
             agent_chat_scroll_handle: ScrollHandle::new(),
             agent_selector_open_for: None,
+            agent_selector_search: String::new(),
+            agent_selector_search_cursor: 0,
+            chat_mode_selector_open_for: None,
             center_tab_order: Vec::new(),
             new_tab_menu_position: None,
             repository_context_menu: None,
@@ -816,6 +827,7 @@ impl ArborWindow {
         app.refresh_github_auth_identity(cx);
         app.restore_terminal_sessions_from_records(initial_daemon_records, attach_daemon_runtime);
         app.restore_agent_chat_sessions(cx);
+        app.probe_provider_models(cx);
         if app.active_outpost_index.is_some() {
             app.refresh_remote_changed_files(cx);
         } else {

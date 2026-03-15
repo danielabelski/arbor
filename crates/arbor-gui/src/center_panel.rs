@@ -385,7 +385,17 @@ impl ArborWindow {
                         ))
                     })
                     .when_some(active_agent_chat, |this, session| {
-                        this.child(render_agent_chat_content(&session, self.agent_selector_open_for, theme, &self.agent_chat_scroll_handle, cx))
+                        this.child(render_agent_chat_content(
+                            &session,
+                            self.agent_selector_open_for,
+                            self.chat_mode_selector_open_for,
+                            &self.agent_selector_search,
+                            self.agent_selector_search_cursor,
+                            &self.configured_providers,
+                            theme,
+                            &self.agent_chat_scroll_handle,
+                            cx,
+                        ))
                     })
                     .when(active_tab == Some(CenterTab::Logs), |this| {
                         this.child(self.render_logs_content(cx))
@@ -867,6 +877,10 @@ impl ArborWindow {
 fn render_agent_chat_content(
     session: &NativeAgentChatSession,
     agent_selector_open_for: Option<u64>,
+    chat_mode_selector_open_for: Option<u64>,
+    agent_selector_search: &str,
+    agent_selector_search_cursor: usize,
+    configured_providers: &[ConfiguredProvider],
     theme: ThemePalette,
     scroll_handle: &ScrollHandle,
     cx: &mut Context<ArborWindow>,
@@ -875,11 +889,21 @@ fn render_agent_chat_content(
     let is_working = session.status == "working";
     let is_exited = session.status == "exited";
     let agent_kind = AgentPresetKind::from_key(&session.agent_kind);
-    let model_label = agent_kind
-        .map(|k| k.label())
-        .unwrap_or_else(|| &session.agent_kind);
+    let selected_model_id = session.selected_model_id.clone();
+    let model_label: String = if let Some(ref model_id) = selected_model_id {
+        // Find the label for the selected model
+        agent_kind
+            .and_then(|k| k.models().iter().find(|m| m.id == model_id.as_str()))
+            .map(|m| m.label.to_owned())
+            .unwrap_or_else(|| model_id.clone())
+    } else {
+        agent_kind
+            .map(|k| k.label().to_owned())
+            .unwrap_or_else(|| session.agent_kind.clone())
+    };
     let token_text = format_token_count(session.input_tokens, session.output_tokens);
     let show_agent_selector = agent_selector_open_for == Some(local_id);
+    let show_mode_selector = chat_mode_selector_open_for == Some(local_id);
 
     div()
         .h_full()
@@ -930,7 +954,7 @@ fn render_agent_chat_content(
                             this.child(render_thinking_indicator(theme))
                         })
                         .when(session.messages.is_empty() && !is_working, |this| {
-                            this.child(render_empty_chat_state(model_label, theme))
+                            this.child(render_empty_chat_state(&model_label, theme))
                         }),
                 ),
         )
@@ -940,15 +964,53 @@ fn render_agent_chat_content(
             session,
             is_working,
             is_exited,
-            model_label,
+            &model_label,
             &token_text,
             agent_kind,
             theme,
             cx,
         ))
-        // Agent selector popup (anchored to bottom-left above composer)
+        // Dismiss overlay: click anywhere outside popup to close it.
+        // Rendered before the popup so GPUI paints the overlay first; the popup
+        // is a later sibling and therefore appears on top.
+        .when(show_agent_selector || show_mode_selector, |this| {
+            this.child(
+                div()
+                    .id("popup-dismiss-overlay")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.agent_selector_open_for = None;
+                        this.agent_selector_search.clear();
+                        this.agent_selector_search_cursor = 0;
+                        this.chat_mode_selector_open_for = None;
+                        cx.notify();
+                    })),
+            )
+        })
+        // Agent selector popup (anchored to bottom-right above composer)
         .when(show_agent_selector, |this| {
-            this.child(render_agent_selector_popup(local_id, agent_kind, theme, cx))
+            this.child(render_agent_selector_popup(
+                local_id,
+                agent_kind,
+                selected_model_id.as_deref(),
+                agent_selector_search,
+                agent_selector_search_cursor,
+                configured_providers,
+                theme,
+                cx,
+            ))
+        })
+        // Chat mode selector popup
+        .when(show_mode_selector, |this| {
+            this.child(render_chat_mode_selector_popup(
+                local_id,
+                session.chat_mode,
+                theme,
+                cx,
+            ))
         })
 }
 
@@ -956,71 +1018,350 @@ fn render_agent_chat_content(
 fn render_agent_selector_popup(
     local_id: u64,
     current_kind: Option<AgentPresetKind>,
+    current_model_id: Option<&str>,
+    search_text: &str,
+    search_cursor: usize,
+    configured_providers: &[ConfiguredProvider],
     theme: ThemePalette,
     cx: &mut Context<ArborWindow>,
 ) -> Div {
     let installed = installed_preset_kinds();
-    let agents: Vec<AgentPresetKind> = AgentPresetKind::ORDER
-        .iter()
-        .copied()
-        .filter(|kind| {
-            installed.contains(kind)
-                && matches!(kind, AgentPresetKind::Claude | AgentPresetKind::Codex)
-        })
-        .collect();
+    let query = search_text.trim().to_ascii_lowercase();
+
+    // Build entries: ACP provider sections first, then configured providers.
+    let mut entries: Vec<ModelSelectorEntry> = Vec::new();
+
+    // ACP agents (via acpx)
+    for &kind in &AgentPresetKind::ORDER {
+        if !installed.contains(&kind) {
+            continue;
+        }
+        let models: Vec<&AgentModel> = kind
+            .models()
+            .iter()
+            .filter(|m| query.is_empty() || m.label.to_ascii_lowercase().contains(&query))
+            .collect();
+        if models.is_empty() {
+            continue;
+        }
+        entries.push(ModelSelectorEntry::Separator(
+            kind.provider_name().to_owned(),
+        ));
+        for model in models {
+            entries.push(ModelSelectorEntry::AcpModel(model.clone()));
+        }
+    }
+
+    // Configured OpenAI-compatible providers (from config.toml)
+    for provider in configured_providers {
+        let models: Vec<&ConfiguredModel> = provider
+            .models
+            .iter()
+            .filter(|m| query.is_empty() || m.label.to_ascii_lowercase().contains(&query))
+            .collect();
+        if models.is_empty() {
+            continue;
+        }
+        entries.push(ModelSelectorEntry::Separator(provider.name.clone()));
+        for model in models {
+            entries.push(ModelSelectorEntry::ApiModel(model.clone()));
+        }
+    }
+
+    let search_text = search_text.to_owned();
+    let search_before = search_text[..search_cursor.min(search_text.len())].to_owned();
+    let search_after = search_text[search_cursor.min(search_text.len())..].to_owned();
 
     div()
         .absolute()
         .bottom(px(60.))
-        .left(px(12.))
-        .w(px(180.))
-        .py(px(4.))
+        .right(px(12.))
+        .w(px(280.))
         .rounded_md()
         .border_1()
         .border_color(rgb(theme.border))
         .bg(rgb(theme.chrome_bg))
         .shadow_lg()
-        .children(agents.into_iter().map(|kind| {
-            let is_current = current_kind == Some(kind);
+        .flex()
+        .flex_col()
+        // Search bar
+        .child(
+            div()
+                .px(px(8.))
+                .py(px(8.))
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .child(
+                    div()
+                        .w_full()
+                        .px(px(8.))
+                        .py(px(5.))
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.terminal_bg))
+                        .text_sm()
+                        .text_color(rgb(theme.text_primary))
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .font_family(FONT_MONO)
+                                .text_xs()
+                                .text_color(rgb(theme.text_disabled))
+                                .mr(px(6.))
+                                .child("\u{f002}"), // nf-fa-search
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .relative()
+                                .flex()
+                                .items_center()
+                                .when(search_text.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .absolute()
+                                            .text_color(rgb(theme.text_disabled))
+                                            .child("Select a model…"),
+                                    )
+                                })
+                                .child(search_before)
+                                .child(
+                                    div()
+                                        .w(px(1.5))
+                                        .h(px(16.))
+                                        .bg(rgb(theme.accent))
+                                        .flex_none(),
+                                )
+                                .child(search_after),
+                        ),
+                ),
+        )
+        // Model list
+        .child(
+            div()
+                .id(ElementId::Name("model-selector-list".into()))
+                .py(px(4.))
+                .max_h(px(320.))
+                .overflow_y_scroll()
+                .children(entries.into_iter().enumerate().map(|(ix, entry)| {
+                    match entry {
+                        ModelSelectorEntry::Separator(label) => div()
+                            .px(px(10.))
+                            .pb(px(2.))
+                            .when(ix > 0, |this| {
+                                this.mt(px(4.))
+                                    .pt(px(6.))
+                                    .border_t_1()
+                                    .border_color(rgb(theme.border))
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_disabled))
+                                    .child(label),
+                            )
+                            .into_any_element(),
+                        ModelSelectorEntry::AcpModel(model) => {
+                            let is_current = current_kind == Some(model.provider)
+                                && match current_model_id {
+                                    Some(id) => id == model.id,
+                                    // No explicit model → highlight the first model of the provider
+                                    None => model.provider.models().first().map(|m| m.id) == Some(model.id),
+                                };
+                            let model_provider = model.provider;
+                            let model_id = model.id;
+                            div()
+                                .id(ElementId::Name(
+                                    format!("model-select-{}", model.id).into(),
+                                ))
+                                .mx(px(6.))
+                                .px(px(8.))
+                                .py(px(6.))
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                .when(is_current, |this| this.bg(rgb(theme.panel_active_bg)))
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(agent_chat_tab_icon_element(
+                                    model.provider,
+                                    if is_current {
+                                        theme.text_primary
+                                    } else {
+                                        theme.text_muted
+                                    },
+                                    16.0,
+                                ))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(theme.text_primary))
+                                        .child(model.label),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.agent_selector_open_for = None;
+                                    this.agent_selector_search.clear();
+                                    this.agent_selector_search_cursor = 0;
+                                    if let Some(session) = this
+                                        .agent_chat_sessions
+                                        .iter_mut()
+                                        .find(|s| s.local_id == local_id)
+                                    {
+                                        session.agent_kind =
+                                            model_provider.key().to_owned();
+                                        session.selected_model_id =
+                                            Some(model_id.to_owned());
+                                    }
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                        },
+                        ModelSelectorEntry::ApiModel(model) => {
+                            let model_label = model.label.clone();
+                            let model_id = model.id.clone();
+                            let provider_name = model.provider_name.clone();
+                            div()
+                                .id(ElementId::Name(
+                                    format!("model-select-api-{}", model.id).into(),
+                                ))
+                                .mx(px(6.))
+                                .px(px(8.))
+                                .py(px(6.))
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                // API icon — use a network/globe glyph to distinguish from ACP
+                                .child(
+                                    div()
+                                        .font_family(FONT_MONO)
+                                        .text_color(rgb(theme.text_muted))
+                                        .text_size(px(14.))
+                                        .flex_none()
+                                        .w(px(18.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child("\u{f0ac}"), // nf-fa-globe
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(theme.text_primary))
+                                        .child(model_label),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.agent_selector_open_for = None;
+                                    this.agent_selector_search.clear();
+                                    this.agent_selector_search_cursor = 0;
+
+                                    // Find the provider to get base_url and api_key
+                                    let provider = this.configured_providers.iter()
+                                        .find(|p| p.name == provider_name);
+
+                                    if let Some(provider) = provider {
+                                        // Create a new session with OpenAI transport
+                                        let transport = terminal_daemon_http::AgentChatTransport::OpenAiChat {
+                                            base_url: provider.base_url.clone(),
+                                            api_key: provider.api_key.clone(),
+                                        };
+                                        this.spawn_api_agent_chat(
+                                            &provider_name,
+                                            &model_id,
+                                            transport,
+                                            cx,
+                                        );
+                                    } else {
+                                        this.notice = Some(format!("Provider '{}' not found", provider_name));
+                                    }
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                        },
+                    }
+                })),
+        )
+}
+
+/// Render the chat mode selector popup (Ask permissions, Auto accept, Plan, Bypass).
+fn render_chat_mode_selector_popup(
+    local_id: u64,
+    current_mode: AgentChatMode,
+    theme: ThemePalette,
+    cx: &mut Context<ArborWindow>,
+) -> Div {
+    div()
+        .absolute()
+        .bottom(px(60.))
+        .left(px(12.))
+        .w(px(280.))
+        .py(px(6.))
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.chrome_bg))
+        .shadow_lg()
+        .children(AgentChatMode::ORDER.iter().copied().map(|mode| {
+            let is_current = current_mode == mode;
             div()
                 .id(ElementId::Name(
-                    format!("agent-select-{}", kind.key()).into(),
+                    format!("mode-select-{}", mode.label()).into(),
                 ))
-                .h(px(30.))
-                .mx(px(4.))
-                .px(px(8.))
-                .rounded_sm()
+                .mx(px(6.))
+                .px(px(10.))
+                .py(px(8.))
+                .rounded_md()
                 .cursor_pointer()
                 .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                 .when(is_current, |this| this.bg(rgb(theme.panel_active_bg)))
                 .flex()
                 .items_center()
-                .gap(px(8.))
-                .child(agent_chat_tab_icon_element(kind, theme.text_muted, 16.0))
+                .gap(px(12.))
                 .child(
                     div()
-                        .text_sm()
-                        .text_color(rgb(theme.text_primary))
-                        .child(kind.label()),
+                        .font_family(FONT_MONO)
+                        .text_base()
+                        .w(px(24.))
+                        .flex_shrink_0()
+                        .text_color(if is_current {
+                            rgb(theme.text_primary)
+                        } else {
+                            rgb(theme.text_muted)
+                        })
+                        .child(mode.icon()),
                 )
-                .when(is_current, |this| {
-                    this.child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .justify_end()
-                            .child(div().text_xs().text_color(rgb(theme.text_muted)).child("✓")),
-                    )
-                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(theme.text_primary))
+                                .child(mode.label()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme.text_disabled))
+                                .child(mode.subtitle()),
+                        ),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.agent_selector_open_for = None;
-                    // Update the agent kind for this session
+                    this.chat_mode_selector_open_for = None;
                     if let Some(session) = this
                         .agent_chat_sessions
                         .iter_mut()
                         .find(|s| s.local_id == local_id)
                     {
-                        session.agent_kind = kind.key().to_owned();
+                        session.chat_mode = mode;
                     }
                     cx.notify();
                 }))
@@ -1041,6 +1382,13 @@ fn render_composer(
 ) -> Div {
     let model_label = model_label.to_owned();
     let token_text = token_text.to_owned();
+    let chat_mode = session.chat_mode;
+
+    // Calculate textarea height: 3 lines minimum, expand up to 10 lines, then scroll.
+    // line_height = 20px, py = 8px top + 8px bottom = 16px
+    let line_count = session.input_text.lines().count().max(1);
+    let visible_lines = line_count.clamp(3, 10);
+    let textarea_height = (visible_lines as f32) * 20.0 + 16.0;
 
     div()
         .flex_none()
@@ -1063,8 +1411,7 @@ fn render_composer(
                             format!("agent-chat-input-{local_id}").into(),
                         ))
                         .w_full()
-                        .min_h(px(40.))
-                        .max_h(px(160.))
+                        .h(px(textarea_height))
                         .overflow_y_scroll()
                         .relative()
                         .px_3()
@@ -1081,29 +1428,71 @@ fn render_composer(
                             let cursor = session.input_cursor.min(session.input_text.len());
                             let before = &session.input_text[..cursor];
                             let after = &session.input_text[cursor..];
-                            div()
+                            let is_empty = session.input_text.is_empty();
+
+                            // Split text into lines, placing the cursor on the
+                            // correct line so it follows newlines properly.
+                            let before_lines: Vec<&str> = before.split('\n').collect();
+                            let after_lines: Vec<&str> = after.split('\n').collect();
+
+                            let cursor_element = div()
+                                .w(px(1.5))
+                                .h(px(18.))
+                                .bg(rgb(theme.accent))
+                                .flex_none();
+
+                            let mut container = div()
+                                .w_full()
+                                .relative()
                                 .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .when(session.input_text.is_empty(), |this| {
-                                    // Show placeholder text behind the cursor
-                                    this.child(
-                                        div()
-                                            .absolute()
-                                            .text_color(rgb(theme.text_muted))
-                                            .child("Message the agent…"),
-                                    )
-                                })
-                                .child(before.to_owned())
-                                // Always show cursor
-                                .child(
+                                .flex_col();
+
+                            if is_empty {
+                                container = container.child(
                                     div()
-                                        .w(px(1.5))
-                                        .h(px(18.))
-                                        .bg(rgb(theme.accent))
-                                        .flex_none(),
-                                )
-                                .child(after.to_owned())
+                                        .absolute()
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("Message the agent…"),
+                                );
+                            }
+
+                            // Lines before the cursor line
+                            for line in &before_lines[..before_lines.len().saturating_sub(1)] {
+                                container = container.child(
+                                    div()
+                                        .w_full()
+                                        .min_h(px(20.))
+                                        .child((*line).to_owned()),
+                                );
+                            }
+
+                            // The cursor line: last before-line + cursor + first after-line
+                            let cursor_line_before =
+                                before_lines.last().copied().unwrap_or("");
+                            let cursor_line_after =
+                                after_lines.first().copied().unwrap_or("");
+                            container = container.child(
+                                div()
+                                    .w_full()
+                                    .min_h(px(20.))
+                                    .flex()
+                                    .items_center()
+                                    .child(cursor_line_before.to_owned())
+                                    .child(cursor_element)
+                                    .child(cursor_line_after.to_owned()),
+                            );
+
+                            // Lines after the cursor line
+                            for line in &after_lines[1..] {
+                                container = container.child(
+                                    div()
+                                        .w_full()
+                                        .min_h(px(20.))
+                                        .child((*line).to_owned()),
+                                );
+                            }
+
+                            container
                         }),
                 ),
         )
@@ -1116,7 +1505,95 @@ fn render_composer(
                 .flex()
                 .items_center()
                 .justify_between()
-                // Left side: model selector + controls
+                // Left side: mode selector + workspace path
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        // Mode selector pill
+                        .child(
+                            render_toolbar_pill(
+                                "agent-chat-mode",
+                                vec![
+                                    div()
+                                        .font_family(FONT_MONO)
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_muted))
+                                        .child(chat_mode.icon())
+                                        .into_any_element(),
+                                    div()
+                                        .text_color(rgb(theme.text_primary))
+                                        .child(chat_mode.label())
+                                        .into_any_element(),
+                                    div()
+                                        .font_family(FONT_MONO)
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("▾")
+                                        .into_any_element(),
+                                ],
+                                theme,
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.chat_mode_selector_open_for == Some(local_id) {
+                                    this.chat_mode_selector_open_for = None;
+                                } else {
+                                    this.chat_mode_selector_open_for = Some(local_id);
+                                    this.agent_selector_open_for = None;
+                                }
+                                cx.notify();
+                            })),
+                        )
+                        // Workspace path
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .text_xs()
+                                .text_color(rgb(theme.text_disabled))
+                                .child(
+                                    div()
+                                        .font_family(FONT_MONO)
+                                        .child("\u{f07b}"), // nf-fa-folder
+                                )
+                                .child({
+                                    let path_str =
+                                        session.workspace_path.display().to_string();
+                                    if let Ok(home) = env::var("HOME") {
+                                        if let Some(rest) =
+                                            path_str.strip_prefix(home.as_str())
+                                        {
+                                            format!("~{rest}")
+                                        } else {
+                                            path_str
+                                        }
+                                    } else {
+                                        path_str
+                                    }
+                                }),
+                        )
+                        // Token count (when non-zero)
+                        .when(!token_text.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_disabled))
+                                    .child(token_text.clone()),
+                            )
+                        })
+                        // Status indicator when working
+                        .when(is_working, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.accent))
+                                    .child("thinking…"),
+                            )
+                        }),
+                )
+                // Right side: model selector + stop + send buttons
                 .child(
                     div()
                         .flex()
@@ -1144,7 +1621,6 @@ fn render_composer(
                                             .child(model_label.clone())
                                             .into_any_element(),
                                     );
-                                    // Dropdown chevron
                                     parts.push(
                                         div()
                                             .font_family(FONT_MONO)
@@ -1160,37 +1636,17 @@ fn render_composer(
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if this.agent_selector_open_for == Some(local_id) {
                                     this.agent_selector_open_for = None;
+                                    this.agent_selector_search.clear();
+                                    this.agent_selector_search_cursor = 0;
                                 } else {
                                     this.agent_selector_open_for = Some(local_id);
+                                    this.agent_selector_search.clear();
+                                    this.agent_selector_search_cursor = 0;
+                                    this.chat_mode_selector_open_for = None;
                                 }
                                 cx.notify();
                             })),
                         )
-                        // Token count (when non-zero)
-                        .when(!token_text.is_empty(), |this| {
-                            this.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_muted))
-                                    .child(token_text.clone()),
-                            )
-                        })
-                        // Status indicator when working
-                        .when(is_working, |this| {
-                            this.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.accent))
-                                    .child("thinking…"),
-                            )
-                        }),
-                )
-                // Right side: stop + send buttons
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
                         // Stop button (only when working)
                         .when(is_working, |this| {
                             this.child(
@@ -1207,7 +1663,6 @@ fn render_composer(
                                     .bg(rgb(theme.panel_active_bg))
                                     .hover(|s| s.bg(rgb(theme.border)))
                                     .child(
-                                        // Square stop icon
                                         div()
                                             .size(px(10.))
                                             .rounded_sm()
@@ -1240,7 +1695,6 @@ fn render_composer(
                                         .text_color(rgb(theme.text_muted))
                                         .opacity(0.5)
                                 })
-                                // Up arrow ↑
                                 .child(
                                     div()
                                         .font_family(FONT_MONO)

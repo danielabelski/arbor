@@ -40,6 +40,41 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 # key = "copilot"
 # command = "copilot --allow-all"
 
+# OpenAI-compatible providers (Ollama, LM Studio, OpenRouter, etc.)
+# Arbor probes /v1/models at startup when fetch_models = true.
+#
+# [[providers]]
+# name = "Ollama"
+# kind = "openai-compatible"
+# base_url = "http://localhost:11434/v1"
+# fetch_models = true
+# # models = [
+# #   { id = "llama3.1:70b", label = "Llama 3.1 70B" },
+# # ]
+#
+# [[providers]]
+# name = "LM Studio"
+# kind = "openai-compatible"
+# base_url = "http://localhost:1234/v1"
+# fetch_models = true
+#
+# [[providers]]
+# name = "OpenRouter"
+# kind = "openai-compatible"
+# base_url = "https://openrouter.ai/api/v1"
+# api_key_env = "OPENROUTER_API_KEY"
+# fetch_models = true
+#
+# [[providers]]
+# name = "OpenAI"
+# kind = "openai-compatible"
+# base_url = "https://api.openai.com/v1"
+# api_key_env = "OPENAI_API_KEY"
+# models = [
+#   { id = "gpt-4o", label = "GPT-4o" },
+#   { id = "gpt-4o-mini", label = "GPT-4o Mini" },
+# ]
+
 # [daemon]
 # auth_token = "your-secret-token"  # required for remote access
 # bind = "all-interfaces"           # all-interfaces | localhost
@@ -68,6 +103,7 @@ pub struct ArborConfig {
     pub notifications: Option<bool>,
     pub preferred_editor: Option<String>,
     pub agent_presets: Vec<AgentPresetConfig>,
+    pub providers: Vec<ProviderConfig>,
     pub remote_hosts: Vec<RemoteHostConfig>,
     pub daemon: Option<DaemonConfig>,
 }
@@ -84,6 +120,51 @@ pub struct DaemonConfig {
 pub struct AgentPresetConfig {
     pub key: String,
     pub command: String,
+}
+
+/// An OpenAI-compatible provider configured in `config.toml`.
+///
+/// ```toml
+/// [[providers]]
+/// name = "Ollama"
+/// kind = "openai-compatible"
+/// base_url = "http://localhost:11434/v1"
+/// # api_key = "optional"
+/// # api_key_env = "OLLAMA_API_KEY"  # read from env var
+/// # fetch_models = true             # probe /v1/models at startup
+/// # models = [
+/// #   { id = "llama3.1:70b", label = "Llama 3.1 70B" },
+/// # ]
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ProviderConfig {
+    /// Display name (e.g. "Ollama", "OpenRouter").
+    pub name: String,
+    /// Provider kind. Currently only `"openai-compatible"` is supported.
+    pub kind: String,
+    /// API base URL (e.g. `http://localhost:11434/v1`).
+    pub base_url: String,
+    /// API key (optional, some local providers don't need one).
+    pub api_key: Option<String>,
+    /// Environment variable name to read the API key from.
+    pub api_key_env: Option<String>,
+    /// Whether to probe the `/v1/models` endpoint for model discovery.
+    #[serde(default)]
+    pub fetch_models: bool,
+    /// Statically configured models.
+    #[serde(default)]
+    pub models: Vec<ProviderModelConfig>,
+}
+
+/// A model entry within a `[[providers]]` section.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ProviderModelConfig {
+    /// Model identifier sent to the API (e.g. `"llama3.1:70b"`).
+    pub id: String,
+    /// Human-readable display name (e.g. `"Llama 3.1 70B"`).
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

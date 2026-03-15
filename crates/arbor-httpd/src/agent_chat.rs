@@ -1,13 +1,17 @@
 //! Interactive agent chat session manager.
 //!
-//! Spawns agent CLI processes via `acpx` (or direct CLI fallback), parses their
-//! JSONL stdout into structured events, and broadcasts them over a
-//! `tokio::sync::broadcast` channel for WebSocket consumers.
+//! Supports two transport modes:
+//! - **ACP** (Agent Client Protocol): spawns agent CLI processes via `acpx`,
+//!   parses their JSONL stdout into structured events.
+//! - **OpenAI-compatible**: sends HTTP requests to `/v1/chat/completions`
+//!   endpoints (Ollama, LM Studio, OpenRouter, OpenAI, etc.) and streams SSE
+//!   responses.
 //!
-//! Each "turn" (user message → agent response) is a separate subprocess
-//! invocation with the same named session, matching the acpx protocol.
+//! Events from both transports are broadcast over a `tokio::sync::broadcast`
+//! channel for WebSocket consumers.
 
 use {
+    futures_util::StreamExt,
     serde::{Deserialize, Serialize},
     serde_json::Value,
     std::{
@@ -37,6 +41,19 @@ pub(crate) enum AgentChatStatus {
     Working,
     /// Agent process has exited (session ended or error).
     Exited,
+}
+
+/// Transport used by an agent chat session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum AgentChatTransport {
+    /// ACP agent via acpx CLI subprocess.
+    Acp,
+    /// OpenAI-compatible HTTP API (Ollama, LM Studio, OpenRouter, etc.).
+    OpenAiChat {
+        base_url: String,
+        api_key: Option<String>,
+    },
 }
 
 /// A structured event emitted by an agent session, streamed to the web UI.
@@ -100,6 +117,11 @@ pub(crate) struct CreateAgentChatRequest {
     pub(crate) workspace_path: String,
     pub(crate) agent_kind: String,
     pub(crate) initial_prompt: Option<String>,
+    /// Model identifier to pass via `--model` to acpx (e.g. "claude-sonnet-4-20250514").
+    pub(crate) model_id: Option<String>,
+    /// Transport configuration. Defaults to ACP if omitted.
+    #[serde(default)]
+    pub(crate) transport: Option<AgentChatTransport>,
 }
 
 /// Response from creating an agent chat session.
@@ -114,6 +136,26 @@ pub(crate) struct SendAgentMessageRequest {
     pub(crate) message: String,
 }
 
+/// A discovered model from an OpenAI-compatible provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DiscoveredModel {
+    pub(crate) id: String,
+    pub(crate) display_name: Option<String>,
+}
+
+/// Request to discover models from an OpenAI-compatible provider.
+#[derive(Debug, Deserialize)]
+pub(crate) struct DiscoverModelsRequest {
+    pub(crate) base_url: String,
+    pub(crate) api_key: Option<String>,
+}
+
+/// Response from model discovery.
+#[derive(Debug, Serialize)]
+pub(crate) struct DiscoverModelsResponse {
+    pub(crate) models: Vec<DiscoveredModel>,
+}
+
 // ── Persistent session record ────────────────────────────────────────
 
 /// A serializable snapshot of an agent chat session for persistence across
@@ -124,9 +166,17 @@ struct AgentChatRecord {
     agent_kind: String,
     workspace_path: PathBuf,
     session_name: String,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default = "default_transport")]
+    transport: AgentChatTransport,
     messages: Vec<ChatMessage>,
     input_tokens: u64,
     output_tokens: u64,
+}
+
+fn default_transport() -> AgentChatTransport {
+    AgentChatTransport::Acp
 }
 
 // ── Internal session state ───────────────────────────────────────────
@@ -136,6 +186,10 @@ struct AgentChatSession {
     agent_kind: String,
     workspace_path: PathBuf,
     session_name: String,
+    /// Model identifier passed via `--model` to acpx or used in OpenAI requests.
+    model_id: Option<String>,
+    /// Transport used for this session.
+    transport: AgentChatTransport,
     event_tx: broadcast::Sender<AgentChatEvent>,
     messages: Vec<ChatMessage>,
     /// Text being streamed for the current assistant turn (not yet finalized).
@@ -154,18 +208,20 @@ struct AgentChatSession {
 /// Manages interactive agent chat sessions.
 pub(crate) struct AgentChatManager {
     sessions: HashMap<String, AgentChatSession>,
+    http_client: reqwest::Client,
 }
 
 impl AgentChatManager {
     pub(crate) fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            http_client: reqwest::Client::new(),
         }
     }
 
     /// Load previously persisted agent chat sessions from disk.
     /// Restored sessions are idle (no running process) but can accept new
-    /// messages which will resume the underlying acpx session.
+    /// messages which will resume the underlying session.
     pub(crate) fn load_persisted_sessions(&mut self) {
         let path = agent_chat_store_path();
         let data = match std::fs::read_to_string(&path) {
@@ -197,6 +253,8 @@ impl AgentChatManager {
                 agent_kind: record.agent_kind,
                 workspace_path: record.workspace_path,
                 session_name: record.session_name,
+                model_id: record.model_id,
+                transport: record.transport,
                 event_tx,
                 messages: record.messages,
                 pending_assistant_text: String::new(),
@@ -237,6 +295,8 @@ impl AgentChatManager {
                     agent_kind: s.agent_kind.clone(),
                     workspace_path: s.workspace_path.clone(),
                     session_name: s.session_name.clone(),
+                    model_id: s.model_id.clone(),
+                    transport: s.transport.clone(),
                     messages,
                     input_tokens: s.input_tokens,
                     output_tokens: s.output_tokens,
@@ -268,6 +328,8 @@ impl AgentChatManager {
         agent_kind: String,
         workspace_path: PathBuf,
         initial_prompt: Option<String>,
+        model_id: Option<String>,
+        transport: Option<AgentChatTransport>,
     ) -> (String, broadcast::Receiver<AgentChatEvent>) {
         let session_id = format!(
             "agent-chat-{}",
@@ -279,11 +341,16 @@ impl AgentChatManager {
         let session_name = format!("arbor-{session_id}");
         let (event_tx, event_rx) = broadcast::channel::<AgentChatEvent>(256);
 
+        let transport = transport.unwrap_or(AgentChatTransport::Acp);
+        let http_client = self.http_client.clone();
+
         let session = AgentChatSession {
             id: session_id.clone(),
             agent_kind: agent_kind.clone(),
             workspace_path: workspace_path.clone(),
             session_name: session_name.clone(),
+            model_id,
+            transport,
             event_tx: event_tx.clone(),
             messages: Vec::new(),
             pending_assistant_text: String::new(),
@@ -308,7 +375,7 @@ impl AgentChatManager {
             let _ = event_tx.send(AgentChatEvent::UserMessage {
                 content: prompt.clone(),
             });
-            start_turn(session, prompt);
+            start_turn(session, prompt, &http_client);
         }
 
         (session_id, event_rx)
@@ -316,6 +383,7 @@ impl AgentChatManager {
 
     /// Send a follow-up message in an existing session.
     pub(crate) fn send_message(&mut self, session_id: &str, message: String) -> Result<(), String> {
+        let http_client = self.http_client.clone();
         let session = self
             .sessions
             .get_mut(session_id)
@@ -334,7 +402,7 @@ impl AgentChatManager {
             content: message.clone(),
         });
 
-        start_turn(session, message);
+        start_turn(session, message, &http_client);
         self.persist();
         Ok(())
     }
@@ -446,8 +514,8 @@ impl AgentChatManager {
 
 // ── Turn execution ───────────────────────────────────────────────────
 
-/// Start a new turn (subprocess) for the session.
-fn start_turn(session: &mut AgentChatSession, prompt: String) {
+/// Start a new turn for the session, dispatching based on transport type.
+fn start_turn(session: &mut AgentChatSession, prompt: String, http_client: &reqwest::Client) {
     session.status = AgentChatStatus::Working;
     let _ = session.event_tx.send(AgentChatEvent::TurnStarted);
 
@@ -455,46 +523,82 @@ fn start_turn(session: &mut AgentChatSession, prompt: String) {
     session.turn_cancel = Some(cancel_tx);
 
     let session_id = session.id.clone();
-    let agent_kind = session.agent_kind.clone();
-    let workspace_path = session.workspace_path.clone();
-    let session_name = session.session_name.clone();
     let event_tx = session.event_tx.clone();
 
-    // We need a shared reference to update session state after the turn.
-    // The caller must wrap AgentChatManager in Arc<Mutex<>> so we use
-    // a channel-based approach: the background task sends events, and
-    // we post a completion event that the manager listens to.
-    tokio::spawn(async move {
-        let result = run_turn(
-            &agent_kind,
-            &workspace_path,
-            &session_name,
-            &prompt,
-            &event_tx,
-            cancel_rx,
-        )
-        .await;
+    match &session.transport {
+        AgentChatTransport::Acp => {
+            let agent_kind = session.agent_kind.clone();
+            let workspace_path = session.workspace_path.clone();
+            let session_name = session.session_name.clone();
+            let model_id = session.model_id.clone();
 
-        match result {
-            Ok(()) => {
-                let _ = event_tx.send(AgentChatEvent::TurnCompleted);
-            },
-            Err(error) => {
-                let _ = event_tx.send(AgentChatEvent::Error {
-                    message: error.clone(),
-                });
-                tracing::warn!(session_id, %error, "agent turn failed");
-            },
-        }
-    });
+            tokio::spawn(async move {
+                let result = run_turn_acpx(
+                    &agent_kind,
+                    &workspace_path,
+                    &session_name,
+                    &prompt,
+                    model_id.as_deref(),
+                    &event_tx,
+                    cancel_rx,
+                )
+                .await;
+
+                match result {
+                    Ok(()) => {
+                        let _ = event_tx.send(AgentChatEvent::TurnCompleted);
+                    },
+                    Err(error) => {
+                        let _ = event_tx.send(AgentChatEvent::Error {
+                            message: error.clone(),
+                        });
+                        tracing::warn!(session_id, %error, "agent turn failed");
+                    },
+                }
+            });
+        },
+        AgentChatTransport::OpenAiChat { base_url, api_key } => {
+            let base_url = base_url.clone();
+            let api_key = api_key.clone();
+            let model_id = session.model_id.clone();
+            let messages = session.messages.clone();
+            let client = http_client.clone();
+
+            tokio::spawn(async move {
+                let result = run_turn_openai(
+                    &client,
+                    &base_url,
+                    api_key.as_deref(),
+                    &model_id,
+                    &messages,
+                    &event_tx,
+                    cancel_rx,
+                )
+                .await;
+
+                match result {
+                    Ok(()) => {
+                        let _ = event_tx.send(AgentChatEvent::TurnCompleted);
+                    },
+                    Err(error) => {
+                        let _ = event_tx.send(AgentChatEvent::Error {
+                            message: error.clone(),
+                        });
+                        tracing::warn!(session_id, %error, "openai turn failed");
+                    },
+                }
+            });
+        },
+    }
 }
 
-/// Run a single turn: spawn acpx, write prompt to stdin, parse JSONL from stdout.
-async fn run_turn(
+/// Run a single turn via acpx: spawn subprocess, write prompt to stdin, parse JSONL.
+async fn run_turn_acpx(
     agent_kind: &str,
     workspace_path: &Path,
     session_name: &str,
     prompt: &str,
+    model_id: Option<&str>,
     event_tx: &broadcast::Sender<AgentChatEvent>,
     mut cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
@@ -526,20 +630,29 @@ async fn run_turn(
         tracing::warn!(session_name, %stderr, "acpx sessions ensure failed, continuing anyway");
     }
 
+    let mut args: Vec<String> = vec![
+        "--format".into(),
+        "json".into(),
+        "--json-strict".into(),
+        "--cwd".into(),
+        cwd_str.clone(),
+    ];
+    // Pass the model identifier if specified (e.g. "claude-sonnet-4-20250514").
+    if let Some(model) = model_id {
+        args.push("--model".into());
+        args.push(model.to_owned());
+    }
+    args.extend([
+        agent_kind.into(),
+        "prompt".into(),
+        "--session".into(),
+        session_name.into(),
+        "--file".into(),
+        "-".into(),
+    ]);
+
     let mut child = Command::new(&acpx_path)
-        .args([
-            "--format",
-            "json",
-            "--json-strict",
-            "--cwd",
-            &cwd_str,
-            agent_kind,
-            "prompt",
-            "--session",
-            session_name,
-            "--file",
-            "-",
-        ])
+        .args(&args)
         .current_dir(workspace_path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -567,7 +680,6 @@ async fn run_turn(
 
     let mut lines = BufReader::new(stdout).lines();
     let mut assistant_text = String::new();
-    let mut tool_calls: Vec<String> = Vec::new();
 
     loop {
         tokio::select! {
@@ -576,14 +688,8 @@ async fn run_turn(
                     Ok(Some(line)) => {
                         if let Some(event) = parse_acpx_event(&line) {
                             // Accumulate assistant text for history
-                            match &event {
-                                AgentChatEvent::MessageChunk { content } => {
-                                    assistant_text.push_str(content);
-                                },
-                                AgentChatEvent::ToolCall { name, status } => {
-                                    tool_calls.push(format!("{name} ({status})"));
-                                },
-                                _ => {},
+                            if let AgentChatEvent::MessageChunk { ref content } = event {
+                                assistant_text.push_str(content);
                             }
                             let _ = event_tx.send(event);
                         }
@@ -612,13 +718,6 @@ async fn run_turn(
         .await
         .map_err(|e| format!("failed to wait for acpx: {e}"))?;
 
-    // Record the assistant message in the event stream for history tracking.
-    // The manager will pick this up from the TurnCompleted event.
-    if !assistant_text.is_empty() {
-        // We don't send another event here — the MessageChunks already went out.
-        // The history is tracked by the manager listening to events.
-    }
-
     if !exit_status.success() {
         let code = exit_status.code();
         // Read stderr for diagnostics
@@ -645,6 +744,290 @@ async fn run_turn(
     }
 
     Ok(())
+}
+
+// ── OpenAI-compatible HTTP transport ─────────────────────────────────
+
+/// Run a single turn via OpenAI-compatible HTTP API with SSE streaming.
+///
+/// Sends the full conversation history plus the latest user message to
+/// `{base_url}/chat/completions` with `stream: true` and parses SSE events.
+async fn run_turn_openai(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: Option<&str>,
+    model_id: &Option<String>,
+    messages: &[ChatMessage],
+    event_tx: &broadcast::Sender<AgentChatEvent>,
+    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    let model = model_id
+        .as_deref()
+        .ok_or_else(|| "no model selected for OpenAI-compatible session".to_owned())?;
+
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+
+    // Convert conversation history to OpenAI message format.
+    let openai_messages: Vec<Value> = messages
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .map(|m| {
+            serde_json::json!({
+                "role": m.role,
+                "content": m.content,
+            })
+        })
+        .collect();
+
+    if openai_messages.is_empty() {
+        return Err("no messages to send".to_owned());
+    }
+
+    tracing::info!(
+        model,
+        base_url,
+        message_count = openai_messages.len(),
+        "starting OpenAI-compatible chat request"
+    );
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": openai_messages,
+        "stream": true,
+        "stream_options": {"include_usage": true},
+    });
+
+    let mut request = client.post(&url).header("User-Agent", "arbor").json(&body);
+
+    if let Some(key) = api_key
+        && !key.is_empty()
+    {
+        request = request.bearer_auth(key);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable>".to_owned());
+        return Err(format!("API error {status}: {body_text}"));
+    }
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    if content_type.contains("text/event-stream") {
+        consume_sse_stream(response, event_tx, &mut cancel_rx).await
+    } else {
+        // Non-streaming JSON response (some providers may not support streaming)
+        consume_json_response(response, event_tx).await
+    }
+}
+
+/// Consume an SSE (Server-Sent Events) stream from an OpenAI-compatible API.
+async fn consume_sse_stream(
+    response: reqwest::Response,
+    event_tx: &broadcast::Sender<AgentChatEvent>,
+    cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+
+    loop {
+        tokio::select! {
+            chunk = stream.next() => {
+                let Some(chunk_result) = chunk else { break };
+                let chunk_bytes = chunk_result
+                    .map_err(|e| format!("stream read error: {e}"))?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk_bytes));
+
+                // Process complete lines from the buffer
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].trim().to_string();
+                    buffer = buffer[pos + 1..].to_string();
+
+                    if line.is_empty() || !line.starts_with("data:") {
+                        continue;
+                    }
+
+                    let data = line.trim_start_matches("data:").trim();
+                    if data == "[DONE]" {
+                        return Ok(());
+                    }
+
+                    let value: Value = serde_json::from_str(data)
+                        .map_err(|e| format!("SSE JSON parse error: {e}"))?;
+
+                    // Extract text content delta
+                    if let Some(delta) = value
+                        .pointer("/choices/0/delta/content")
+                        .and_then(Value::as_str)
+                        && !delta.is_empty()
+                    {
+                        let _ = event_tx.send(AgentChatEvent::MessageChunk {
+                            content: delta.to_string(),
+                        });
+                    }
+
+                    // Extract usage info
+                    if let Some((input, output)) = parse_openai_usage(&value) {
+                        let _ = event_tx.send(AgentChatEvent::UsageUpdate {
+                            input_tokens: input,
+                            output_tokens: output,
+                        });
+                    }
+
+                    // Extract tool calls (report as status, since we don't execute them)
+                    if let Some(tool_calls) = value
+                        .pointer("/choices/0/delta/tool_calls")
+                        .and_then(Value::as_array)
+                    {
+                        for call in tool_calls {
+                            if let Some(name) = call
+                                .pointer("/function/name")
+                                .and_then(Value::as_str)
+                            {
+                                let _ = event_tx.send(AgentChatEvent::ToolCall {
+                                    name: name.to_owned(),
+                                    status: "requested".to_owned(),
+                                });
+                            }
+                        }
+                    }
+                }
+            },
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() {
+                    return Err("turn cancelled".to_owned());
+                }
+            },
+        }
+    }
+
+    Ok(())
+}
+
+/// Consume a non-streaming JSON response from an OpenAI-compatible API.
+async fn consume_json_response(
+    response: reqwest::Response,
+    event_tx: &broadcast::Sender<AgentChatEvent>,
+) -> Result<(), String> {
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("JSON parse error: {e}"))?;
+
+    // Extract the assistant message content
+    let content = payload["choices"][0]["message"]["content"]
+        .as_str()
+        .or_else(|| payload["output_text"].as_str())
+        .unwrap_or_default();
+
+    if !content.is_empty() {
+        let _ = event_tx.send(AgentChatEvent::MessageChunk {
+            content: content.to_owned(),
+        });
+    }
+
+    // Extract usage
+    if let Some((input, output)) = parse_openai_usage(&payload) {
+        let _ = event_tx.send(AgentChatEvent::UsageUpdate {
+            input_tokens: input,
+            output_tokens: output,
+        });
+    }
+
+    Ok(())
+}
+
+/// Parse OpenAI usage fields from a JSON payload.
+/// Handles both `prompt_tokens`/`completion_tokens` and `input_tokens`/`output_tokens`.
+fn parse_openai_usage(payload: &Value) -> Option<(u64, u64)> {
+    let usage = payload.get("usage")?;
+    let input = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("input_tokens").and_then(Value::as_u64))?;
+    let output = usage
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("output_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    Some((input, output))
+}
+
+// ── Model discovery ──────────────────────────────────────────────────
+
+/// Discover available models from an OpenAI-compatible `/v1/models` endpoint.
+pub(crate) async fn discover_openai_models(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<DiscoveredModel>, String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+
+    tracing::info!(base_url, "discovering OpenAI-compatible models");
+
+    let mut request = client.get(&url).header("User-Agent", "arbor");
+
+    if let Some(key) = api_key
+        && !key.is_empty()
+    {
+        request = request.bearer_auth(key);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("model discovery failed: {e}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable>".to_owned());
+        return Err(format!("model discovery failed with {status}: {body}"));
+    }
+
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("model discovery JSON error: {e}"))?;
+
+    let models = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            let id = model.get("id")?.as_str()?.to_owned();
+            let display_name = model
+                .get("name")
+                .or_else(|| model.get("display_name"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            Some(DiscoveredModel { id, display_name })
+        })
+        .collect::<Vec<_>>();
+
+    tracing::info!(
+        base_url,
+        count = models.len(),
+        "discovered OpenAI-compatible models"
+    );
+
+    Ok(models)
 }
 
 /// Find the acpx binary.
@@ -960,5 +1343,40 @@ mod tests {
             AgentChatEvent::MessageChunk { content } => assert_eq!(content, "hi"),
             other => panic!("expected MessageChunk, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_openai_usage_standard() {
+        let payload = serde_json::json!({
+            "usage": {"prompt_tokens": 12, "completion_tokens": 8}
+        });
+        let (input, output) = parse_openai_usage(&payload).unwrap();
+        assert_eq!(input, 12);
+        assert_eq!(output, 8);
+    }
+
+    #[test]
+    fn parse_openai_usage_anthropic_style() {
+        let payload = serde_json::json!({
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        });
+        let (input, output) = parse_openai_usage(&payload).unwrap();
+        assert_eq!(input, 100);
+        assert_eq!(output, 50);
+    }
+
+    #[test]
+    fn transport_serialization() {
+        let acp = AgentChatTransport::Acp;
+        let json = serde_json::to_string(&acp).unwrap();
+        assert!(json.contains("\"type\":\"acp\""));
+
+        let openai = AgentChatTransport::OpenAiChat {
+            base_url: "http://localhost:11434/v1".to_owned(),
+            api_key: None,
+        };
+        let json = serde_json::to_string(&openai).unwrap();
+        assert!(json.contains("\"type\":\"open_ai_chat\""));
+        assert!(json.contains("localhost:11434"));
     }
 }

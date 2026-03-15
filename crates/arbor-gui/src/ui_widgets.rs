@@ -5,7 +5,10 @@ use {
         AnyElement, Bounds, Div, ElementId, FontWeight, Image, ImageFormat, Pixels, Stateful, div,
         img, point, px, rgb, size,
     },
-    std::sync::{Arc, OnceLock},
+    std::{
+        collections::{HashMap, HashSet},
+        sync::{Arc, Mutex, OnceLock},
+    },
 };
 
 pub(crate) fn loading_status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
@@ -61,34 +64,24 @@ pub(crate) enum ActionButtonStyle {
     Secondary,
 }
 
+/// Return the icon image for a preset kind, if one exists.
+/// Returns `None` for agents without custom icon assets.
 pub(crate) fn preset_icon_image(kind: AgentPresetKind) -> Arc<Image> {
-    static CLAUDE_ICON: OnceLock<Arc<Image>> = OnceLock::new();
-    static CODEX_ICON: OnceLock<Arc<Image>> = OnceLock::new();
-    static PI_ICON: OnceLock<Arc<Image>> = OnceLock::new();
-    static OPENCODE_ICON: OnceLock<Arc<Image>> = OnceLock::new();
-    static COPILOT_ICON: OnceLock<Arc<Image>> = OnceLock::new();
-
-    let lock = match kind {
-        AgentPresetKind::Codex => &CODEX_ICON,
-        AgentPresetKind::Claude => &CLAUDE_ICON,
-        AgentPresetKind::Pi => &PI_ICON,
-        AgentPresetKind::OpenCode => &OPENCODE_ICON,
-        AgentPresetKind::Copilot => &COPILOT_ICON,
-    };
-
-    lock.get_or_init(|| {
-        tracing::info!(
-            preset = kind.key(),
-            asset = preset_icon_asset_path(kind),
-            bytes = preset_icon_bytes(kind).len(),
-            "loading preset icon asset"
-        );
-        Arc::new(Image::from_bytes(
-            preset_icon_format(kind),
-            preset_icon_bytes(kind).to_vec(),
-        ))
-    })
-    .clone()
+    static ICONS: OnceLock<Mutex<HashMap<AgentPresetKind, Arc<Image>>>> = OnceLock::new();
+    let map = ICONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(kind)
+        .or_insert_with(|| {
+            let bytes = preset_icon_bytes(kind);
+            let format = preset_icon_format(kind);
+            tracing::info!(
+                preset = kind.key(),
+                bytes = bytes.len(),
+                "loading preset icon asset"
+            );
+            Arc::new(Image::from_bytes(format, bytes.to_vec()))
+        })
+        .clone()
 }
 
 pub(crate) fn preset_icon_bytes(kind: AgentPresetKind) -> &'static [u8] {
@@ -98,16 +91,15 @@ pub(crate) fn preset_icon_bytes(kind: AgentPresetKind) -> &'static [u8] {
         AgentPresetKind::Pi => PRESET_ICON_PI_SVG,
         AgentPresetKind::OpenCode => PRESET_ICON_OPENCODE_SVG,
         AgentPresetKind::Copilot => PRESET_ICON_COPILOT_SVG,
+        // Agents without custom icons use a generic terminal icon
+        _ => PRESET_ICON_CODEX_SVG,
     }
 }
 
 pub(crate) fn preset_icon_format(kind: AgentPresetKind) -> ImageFormat {
     match kind {
-        AgentPresetKind::Codex
-        | AgentPresetKind::Pi
-        | AgentPresetKind::OpenCode
-        | AgentPresetKind::Copilot => ImageFormat::Svg,
         AgentPresetKind::Claude => ImageFormat::Png,
+        _ => ImageFormat::Svg,
     }
 }
 
@@ -118,25 +110,15 @@ pub(crate) fn preset_icon_asset_path(kind: AgentPresetKind) -> &'static str {
         AgentPresetKind::Pi => "assets/preset-icons/pi-white.svg",
         AgentPresetKind::OpenCode => "assets/preset-icons/opencode-white.svg",
         AgentPresetKind::Copilot => "assets/preset-icons/copilot-white.svg",
+        _ => "assets/preset-icons/codex-white.svg",
     }
 }
 
 pub(crate) fn log_preset_icon_fallback_once(kind: AgentPresetKind, fallback_glyph: &'static str) {
-    static CLAUDE_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
-    static CODEX_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
-    static PI_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
-    static OPENCODE_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
-    static COPILOT_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
-
-    let once = match kind {
-        AgentPresetKind::Codex => &CODEX_FALLBACK_LOGGED,
-        AgentPresetKind::Claude => &CLAUDE_FALLBACK_LOGGED,
-        AgentPresetKind::Pi => &PI_FALLBACK_LOGGED,
-        AgentPresetKind::OpenCode => &OPENCODE_FALLBACK_LOGGED,
-        AgentPresetKind::Copilot => &COPILOT_FALLBACK_LOGGED,
-    };
-
-    once.get_or_init(|| {
+    static LOGGED: OnceLock<Mutex<HashSet<AgentPresetKind>>> = OnceLock::new();
+    let set = LOGGED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut set = set.lock().unwrap_or_else(|e| e.into_inner());
+    if set.insert(kind) {
         tracing::warn!(
             preset = kind.key(),
             asset = preset_icon_asset_path(kind),
@@ -151,40 +133,26 @@ pub(crate) fn log_preset_icon_fallback_once(kind: AgentPresetKind, fallback_glyp
             preset_icon_bytes(kind).len(),
             fallback_glyph
         );
-    });
+    }
 }
 
 pub(crate) fn log_preset_icon_render_once(kind: AgentPresetKind) {
-    static CLAUDE_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
-    static CODEX_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
-    static PI_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
-    static OPENCODE_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
-    static COPILOT_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
-
-    let once = match kind {
-        AgentPresetKind::Codex => &CODEX_RENDER_LOGGED,
-        AgentPresetKind::Claude => &CLAUDE_RENDER_LOGGED,
-        AgentPresetKind::Pi => &PI_RENDER_LOGGED,
-        AgentPresetKind::OpenCode => &OPENCODE_RENDER_LOGGED,
-        AgentPresetKind::Copilot => &COPILOT_RENDER_LOGGED,
-    };
-
-    once.get_or_init(|| {
+    static LOGGED: OnceLock<Mutex<HashSet<AgentPresetKind>>> = OnceLock::new();
+    let set = LOGGED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut set = set.lock().unwrap_or_else(|e| e.into_inner());
+    if set.insert(kind) {
         tracing::info!(
             preset = kind.key(),
             asset = preset_icon_asset_path(kind),
             "preset icon render path active"
         );
-    });
+    }
 }
 
 pub(crate) fn preset_icon_render_size_px(kind: AgentPresetKind) -> f32 {
     match kind {
         AgentPresetKind::Codex => 20.,
-        AgentPresetKind::Claude
-        | AgentPresetKind::Pi
-        | AgentPresetKind::OpenCode
-        | AgentPresetKind::Copilot => 14.,
+        _ => 14.,
     }
 }
 
@@ -196,18 +164,9 @@ pub(crate) fn agent_preset_button_content(kind: AgentPresetKind, text_color: u32
     let icon_slot_size = 20_f32;
     let fallback_color = match kind {
         AgentPresetKind::Claude => 0xD97757,
-        AgentPresetKind::Codex
-        | AgentPresetKind::Pi
-        | AgentPresetKind::OpenCode
-        | AgentPresetKind::Copilot => text_color,
+        _ => text_color,
     };
-    let fallback_glyph = match kind {
-        AgentPresetKind::Claude => "C",
-        AgentPresetKind::Codex
-        | AgentPresetKind::Pi
-        | AgentPresetKind::OpenCode
-        | AgentPresetKind::Copilot => kind.fallback_icon(),
-    };
+    let fallback_glyph = kind.fallback_icon();
     div()
         .flex()
         .items_center()

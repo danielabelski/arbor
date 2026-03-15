@@ -1,6 +1,6 @@
 use {
     super::*,
-    std::{collections::HashSet, sync::OnceLock},
+    std::{collections::HashSet, env, process::Command, sync::OnceLock},
 };
 
 impl ArborWindow {
@@ -517,18 +517,69 @@ pub(crate) fn is_command_in_path(command: &str) -> bool {
     env::split_paths(&path_var).any(|dir| dir.join(command).is_file())
 }
 
-/// Return the set of `AgentPresetKind` variants whose CLI is found in PATH.
-/// Cached for the lifetime of the process (the set of installed tools is
-/// unlikely to change while the app is running).
+/// Return the set of `AgentPresetKind` variants available via acpx.
+///
+/// Discovery runs `acpx --help` and parses the "Commands:" section to find
+/// available agent subcommands. Falls back to checking individual CLIs in PATH
+/// if acpx is not installed. Cached for the lifetime of the process.
 pub(crate) fn installed_preset_kinds() -> &'static HashSet<AgentPresetKind> {
     static INSTALLED: OnceLock<HashSet<AgentPresetKind>> = OnceLock::new();
     INSTALLED.get_or_init(|| {
-        AgentPresetKind::ORDER
-            .iter()
-            .copied()
-            .filter(|kind| kind.is_installed())
-            .collect()
+        if let Some(agents) = discover_acpx_agents() {
+            agents
+        } else {
+            // Fallback: check individual CLIs in PATH
+            AgentPresetKind::ORDER
+                .iter()
+                .copied()
+                .filter(|kind| kind.is_installed())
+                .collect()
+        }
     })
+}
+
+/// Run `acpx --help` and parse available agent subcommands from the output.
+fn discover_acpx_agents() -> Option<HashSet<AgentPresetKind>> {
+    if !is_command_in_path("acpx") {
+        return None;
+    }
+
+    let output = Command::new("acpx").arg("--help").output().ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut agents = HashSet::new();
+    let mut in_commands = false;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed == "Commands:" {
+            in_commands = true;
+            continue;
+        }
+        if !in_commands {
+            continue;
+        }
+        // Commands section lines look like: "  claude [options] [prompt...]  Use claude agent"
+        // Stop at non-indented lines or empty lines after commands
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !line.starts_with(' ') {
+            break;
+        }
+        // Extract the first word (the subcommand name)
+        let subcommand = trimmed.split_whitespace().next().unwrap_or("");
+        // Skip non-agent subcommands (prompt, exec, cancel, set-mode, set, status, sessions, config)
+        if let Some(kind) = AgentPresetKind::from_key(subcommand) {
+            agents.insert(kind);
+        }
+    }
+
+    if agents.is_empty() {
+        None
+    } else {
+        Some(agents)
+    }
 }
 
 pub(crate) fn default_agent_presets() -> Vec<AgentPreset> {
@@ -561,4 +612,52 @@ pub(crate) fn normalize_agent_presets(
     }
 
     presets
+}
+
+/// Load configured providers from `[[providers]]` in config.toml.
+///
+/// Resolves API keys from environment variables when `api_key_env` is set.
+/// Converts `ProviderConfig` entries into `ConfiguredProvider` runtime structs.
+pub(crate) fn load_configured_providers(
+    configs: &[app_config::ProviderConfig],
+) -> Vec<ConfiguredProvider> {
+    configs
+        .iter()
+        .filter(|config| config.kind == "openai-compatible" && !config.name.is_empty())
+        .map(|config| {
+            let api_key = config
+                .api_key
+                .clone()
+                .or_else(|| {
+                    config
+                        .api_key_env
+                        .as_deref()
+                        .and_then(|env_name| env::var(env_name).ok())
+                })
+                .filter(|key| !key.is_empty());
+
+            let models = config
+                .models
+                .iter()
+                .filter(|m| !m.id.is_empty())
+                .map(|m| ConfiguredModel {
+                    provider_name: config.name.clone(),
+                    id: m.id.clone(),
+                    label: if m.label.is_empty() {
+                        m.id.clone()
+                    } else {
+                        m.label.clone()
+                    },
+                })
+                .collect();
+
+            ConfiguredProvider {
+                name: config.name.clone(),
+                base_url: config.base_url.clone(),
+                api_key,
+                fetch_models: config.fetch_models,
+                models,
+            }
+        })
+        .collect()
 }

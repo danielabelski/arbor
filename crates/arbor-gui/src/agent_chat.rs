@@ -24,7 +24,8 @@ impl ArborWindow {
         let agent_kind_clone = agent_kind.clone();
 
         cx.spawn(async move |this, cx| {
-            let result = daemon.create_agent_chat(&workspace_path_str, &agent_kind_clone, None);
+            let result =
+                daemon.create_agent_chat(&workspace_path_str, &agent_kind_clone, None, None, None);
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
                     match result {
@@ -34,6 +35,7 @@ impl ArborWindow {
                                 local_id,
                                 session_id: response.session_id,
                                 agent_kind: agent_kind_clone,
+                                selected_model_id: None,
                                 workspace_path: workspace_path_clone.clone(),
                                 status: "idle".to_owned(),
                                 messages: Vec::new(),
@@ -41,6 +43,7 @@ impl ArborWindow {
                                 input_cursor: 0,
                                 input_tokens: 0,
                                 output_tokens: 0,
+                                chat_mode: AgentChatMode::default(),
                             };
                             this.agent_chat_sessions.push(session);
                             this.active_agent_chat_by_worktree
@@ -64,6 +67,165 @@ impl ArborWindow {
         .detach();
     }
 
+    /// Create a new agent chat session with an OpenAI-compatible provider.
+    pub(crate) fn spawn_api_agent_chat(
+        &mut self,
+        provider_name: &str,
+        model_id: &str,
+        transport: terminal_daemon_http::AgentChatTransport,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("No worktree selected".to_owned());
+            cx.notify();
+            return;
+        };
+
+        let Some(daemon) = self.terminal_daemon.clone() else {
+            self.notice = Some("No daemon connection".to_owned());
+            cx.notify();
+            return;
+        };
+
+        let workspace_path_str = worktree_path.display().to_string();
+        let local_id = self.next_agent_chat_id;
+        self.next_agent_chat_id += 1;
+
+        let agent_kind = provider_name.to_owned();
+        let model = model_id.to_owned();
+        let workspace_path_clone = worktree_path.clone();
+        let agent_kind_clone = agent_kind.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = daemon.create_agent_chat(
+                &workspace_path_str,
+                &agent_kind_clone,
+                None,
+                Some(&model),
+                Some(transport),
+            );
+            cx.update(|cx| {
+                this.update(cx, |this, cx| match result {
+                    Ok(response) => {
+                        let session_id = response.session_id.clone();
+                        let session = NativeAgentChatSession {
+                            local_id,
+                            session_id: response.session_id,
+                            agent_kind: agent_kind_clone,
+                            selected_model_id: Some(model.clone()),
+                            workspace_path: workspace_path_clone.clone(),
+                            status: "idle".to_owned(),
+                            messages: Vec::new(),
+                            input_text: String::new(),
+                            input_cursor: 0,
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            chat_mode: AgentChatMode::default(),
+                        };
+                        this.agent_chat_sessions.push(session);
+                        this.active_agent_chat_by_worktree
+                            .insert(workspace_path_clone, local_id);
+                        this.active_diff_session_id = None;
+                        this.active_file_view_session_id = None;
+                        this.logs_tab_active = false;
+                        this.start_agent_chat_ws(local_id, session_id, daemon.clone(), cx);
+                        cx.notify();
+                    },
+                    Err(error) => {
+                        this.notice = Some(format!("Failed to create agent chat: {error}"));
+                        cx.notify();
+                    },
+                })
+            })
+        })
+        .detach();
+    }
+
+    /// Probe `/v1/models` endpoints for configured providers with `fetch_models = true`.
+    ///
+    /// Runs in the background; discovered models are merged into
+    /// `configured_providers` and the UI is notified to refresh.
+    pub(crate) fn probe_provider_models(&mut self, cx: &mut Context<Self>) {
+        let Some(daemon) = self.terminal_daemon.clone() else {
+            return;
+        };
+
+        // Collect providers that need probing
+        let providers_to_probe: Vec<(String, String, Option<String>)> = self
+            .configured_providers
+            .iter()
+            .filter(|p| p.fetch_models)
+            .map(|p| (p.name.clone(), p.base_url.clone(), p.api_key.clone()))
+            .collect();
+
+        if providers_to_probe.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            count = providers_to_probe.len(),
+            "probing OpenAI-compatible providers for models"
+        );
+
+        cx.spawn(async move |this, cx| {
+            for (provider_name, base_url, api_key) in providers_to_probe {
+                let discovered = daemon.discover_models(&base_url, api_key.as_deref());
+
+                match discovered {
+                    Ok(models) => {
+                        tracing::info!(
+                            provider = %provider_name,
+                            count = models.len(),
+                            "discovered models from provider"
+                        );
+
+                        let name = provider_name.clone();
+                        let discovered_models: Vec<(String, String)> = models
+                            .into_iter()
+                            .map(|m| {
+                                let label = m.display_name.unwrap_or_else(|| m.id.clone());
+                                (m.id, label)
+                            })
+                            .collect();
+
+                        let _ = cx.update(|cx| {
+                            this.update(cx, |this, cx| {
+                                if let Some(provider) = this
+                                    .configured_providers
+                                    .iter_mut()
+                                    .find(|p| p.name == name)
+                                {
+                                    // Merge: keep statically configured models, add discovered ones
+                                    let existing_ids: HashSet<String> =
+                                        provider.models.iter().map(|m| m.id.clone()).collect();
+
+                                    for (id, label) in discovered_models {
+                                        if !existing_ids.contains(&id) {
+                                            provider.models.push(ConfiguredModel {
+                                                provider_name: name.clone(),
+                                                id,
+                                                label,
+                                            });
+                                        }
+                                    }
+                                }
+                                cx.notify();
+                            })
+                        });
+                    },
+                    Err(error) => {
+                        tracing::warn!(
+                            provider = %provider_name,
+                            %error,
+                            "failed to discover models from provider"
+                        );
+                    },
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Restore agent chat sessions from the daemon on startup.
     /// Queries the daemon for existing agent chat sessions and creates local
     /// tabs for any that match known worktrees. Connects WebSocket to each
@@ -76,10 +238,15 @@ impl ArborWindow {
         let sessions = match daemon.list_agent_chats() {
             Ok(s) => s,
             Err(error) => {
-                tracing::debug!(%error, "failed to list agent chats for restore");
+                tracing::warn!(%error, "failed to list agent chats for restore");
                 return;
             },
         };
+
+        tracing::info!(
+            count = sessions.len(),
+            "agent chat restore: sessions from daemon"
+        );
 
         if sessions.is_empty() {
             return;
@@ -87,11 +254,6 @@ impl ArborWindow {
 
         for summary in sessions {
             let workspace_path = PathBuf::from(&summary.workspace_path);
-
-            // Only restore sessions for known worktrees
-            if !self.worktrees.iter().any(|w| w.path == workspace_path) {
-                continue;
-            }
 
             // Skip if we already have a session with this daemon ID
             if self
@@ -109,6 +271,7 @@ impl ArborWindow {
                 local_id,
                 session_id: summary.id.clone(),
                 agent_kind: summary.agent_kind,
+                selected_model_id: None,
                 workspace_path: workspace_path.clone(),
                 status: summary.status,
                 messages: Vec::new(), // Will be filled by WebSocket snapshot
@@ -116,6 +279,7 @@ impl ArborWindow {
                 input_cursor: 0,
                 input_tokens: summary.input_tokens,
                 output_tokens: summary.output_tokens,
+                chat_mode: AgentChatMode::default(),
             };
 
             self.agent_chat_sessions.push(session);
@@ -146,9 +310,48 @@ impl ArborWindow {
         let key = event.keystroke.key.as_str();
         let modifiers = &event.keystroke.modifiers;
 
-        // Dismiss agent selector popup on any key
+        // When the model selector popup is open, route keys to its search field.
         if self.agent_selector_open_for.is_some() {
-            self.agent_selector_open_for = None;
+            match key {
+                "escape" => {
+                    self.agent_selector_open_for = None;
+                    self.agent_selector_search.clear();
+                    self.agent_selector_search_cursor = 0;
+                    cx.notify();
+                    return true;
+                },
+                "backspace" => {
+                    if self.agent_selector_search_cursor > 0 {
+                        let remove_at = self.agent_selector_search_cursor - 1;
+                        self.agent_selector_search.remove(remove_at);
+                        self.agent_selector_search_cursor -= 1;
+                    }
+                    cx.notify();
+                    return true;
+                },
+                _ => {
+                    // Type printable characters into search
+                    if !modifiers.control
+                        && !modifiers.alt
+                        && !modifiers.platform
+                        && !modifiers.function
+                        && let Some(ch) = &event.keystroke.key_char
+                    {
+                        let s = ch.to_string();
+                        let cursor = self.agent_selector_search_cursor;
+                        self.agent_selector_search.insert_str(cursor, &s);
+                        self.agent_selector_search_cursor += s.len();
+                        cx.notify();
+                        return true;
+                    }
+                },
+            }
+            return false;
+        }
+
+        // Dismiss mode selector popup on any key
+        if self.chat_mode_selector_open_for.is_some() {
+            self.chat_mode_selector_open_for = None;
             cx.notify();
             if key == "escape" {
                 return true;

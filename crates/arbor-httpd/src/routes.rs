@@ -91,6 +91,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/agent/chat/{session_id}/cancel", post(cancel_agent_chat))
         .route("/agent/chat/{session_id}/history", get(agent_chat_history))
         .route("/agent/chat/{session_id}/ws", get(agent_chat_ws))
+        .route("/agent/chat/discover-models", post(discover_models))
         .route("/processes", get(list_processes))
         .route("/processes/start-all", post(start_all_processes))
         .route("/processes/stop-all", post(stop_all_processes))
@@ -2103,6 +2104,15 @@ pub(crate) fn not_found_error(message: String) -> (StatusCode, Json<ApiError>) {
     (StatusCode::NOT_FOUND, Json(ApiError { error: message }))
 }
 
+fn bad_gateway_error(message: &str) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(ApiError {
+            error: message.to_owned(),
+        }),
+    )
+}
+
 pub(crate) fn map_daemon_error(error: LocalTerminalDaemonError) -> (StatusCode, Json<ApiError>) {
     match error {
         LocalTerminalDaemonError::SessionNotFound { session_id } => {
@@ -2507,8 +2517,13 @@ async fn create_agent_chat(
 ) -> ApiResult<crate::agent_chat::CreateAgentChatResponse> {
     let workspace_path = PathBuf::from(&request.workspace_path);
     let mut manager = state.agent_chat.lock().await;
-    let (session_id, event_rx) =
-        manager.create_session(request.agent_kind, workspace_path, request.initial_prompt);
+    let (session_id, event_rx) = manager.create_session(
+        request.agent_kind,
+        workspace_path,
+        request.initial_prompt,
+        request.model_id,
+        request.transport,
+    );
     manager.persist();
 
     // Spawn a background listener to track conversation state
@@ -2641,6 +2656,16 @@ async fn handle_agent_chat_ws(mut socket: WebSocket, state: AppState, session_id
             },
         }
     }
+}
+
+async fn discover_models(
+    Json(request): Json<crate::agent_chat::DiscoverModelsRequest>,
+) -> ApiResult<crate::agent_chat::DiscoverModelsResponse> {
+    let models =
+        crate::agent_chat::discover_openai_models(&request.base_url, request.api_key.as_deref())
+            .await
+            .map_err(|e| bad_gateway_error(&e))?;
+    Ok(Json(crate::agent_chat::DiscoverModelsResponse { models }))
 }
 
 #[cfg(test)]

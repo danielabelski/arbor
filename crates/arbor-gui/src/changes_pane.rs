@@ -140,7 +140,8 @@ impl ArborWindow {
                     format!("right-tab-{label}").to_lowercase().into(),
                 ))
                 .flex_1()
-                .h(px(28.))
+                .h(px(32.))
+                .px_2()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -202,7 +203,7 @@ impl ArborWindow {
         };
 
         div()
-            .h(px(28.))
+            .h(px(32.))
             .flex()
             .flex_row()
             .border_b_1()
@@ -683,7 +684,7 @@ impl ArborWindow {
                     .flex()
                     .flex_col()
                     .font_family(FONT_MONO)
-                    .p_1()
+                    .p_2()
                     .gap_2()
                     .child(list),
             )

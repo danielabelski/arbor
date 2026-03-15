@@ -1046,8 +1046,11 @@ pub(crate) struct NativeAgentChatSession {
     pub(crate) local_id: u64,
     /// Daemon-managed session ID (string).
     pub(crate) session_id: String,
-    /// Agent kind (e.g. "claude", "codex").
+    /// Agent kind / provider key (e.g. "claude", "codex").
     pub(crate) agent_kind: String,
+    /// Selected model ID within the provider (e.g. "claude-opus").
+    /// When `None`, the provider default is used.
+    pub(crate) selected_model_id: Option<String>,
     /// Workspace path this chat is associated with.
     pub(crate) workspace_path: PathBuf,
     /// Current status from the daemon.
@@ -1062,6 +1065,58 @@ pub(crate) struct NativeAgentChatSession {
     pub(crate) input_tokens: u64,
     /// Cumulative output token usage.
     pub(crate) output_tokens: u64,
+    /// Permission mode for this chat session.
+    pub(crate) chat_mode: AgentChatMode,
+}
+
+/// Permission/autonomy mode for an agent chat session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum AgentChatMode {
+    /// Create a plan before making changes.
+    Plan,
+    /// Ask permission before making changes.
+    #[default]
+    AskPermission,
+    /// Automatically accept edits.
+    AutoAccept,
+    /// Full permissions, no approval needed.
+    Bypass,
+}
+
+impl AgentChatMode {
+    pub(crate) const ORDER: [Self; 4] = [
+        Self::AskPermission,
+        Self::AutoAccept,
+        Self::Plan,
+        Self::Bypass,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Plan => "Plan mode",
+            Self::AskPermission => "Ask permissions",
+            Self::AutoAccept => "Auto accept edits",
+            Self::Bypass => "Bypass permissions",
+        }
+    }
+
+    pub(crate) fn subtitle(self) -> &'static str {
+        match self {
+            Self::Plan => "Create a plan before making changes",
+            Self::AskPermission => "Always ask before making changes",
+            Self::AutoAccept => "Automatically accept all file edits",
+            Self::Bypass => "Accepts all permissions",
+        }
+    }
+
+    pub(crate) fn icon(self) -> &'static str {
+        match self {
+            Self::Plan => "\u{f0c9}",          // nf-fa-bars
+            Self::AskPermission => "\u{f013}", // nf-fa-gear
+            Self::AutoAccept => "\u{f00c}",    // nf-fa-check
+            Self::Bypass => "\u{f0e7}",        // nf-fa-bolt
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1074,11 +1129,20 @@ pub(crate) enum RightPaneTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum AgentPresetKind {
-    Codex,
     Claude,
-    Pi,
-    OpenCode,
+    Codex,
     Copilot,
+    Cursor,
+    Droid,
+    Gemini,
+    Iflow,
+    Kilocode,
+    Kimi,
+    Kiro,
+    OpenClaw,
+    OpenCode,
+    Pi,
+    Qwen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1109,41 +1173,79 @@ impl ExecutionMode {
 }
 
 impl AgentPresetKind {
-    pub(crate) const ORDER: [Self; 5] = [
-        Self::Codex,
+    /// All known agent kinds, in display order.
+    pub(crate) const ORDER: [Self; 14] = [
         Self::Claude,
-        Self::Pi,
-        Self::OpenCode,
+        Self::Codex,
         Self::Copilot,
+        Self::Cursor,
+        Self::Droid,
+        Self::Gemini,
+        Self::Iflow,
+        Self::Kilocode,
+        Self::Kimi,
+        Self::Kiro,
+        Self::OpenClaw,
+        Self::OpenCode,
+        Self::Pi,
+        Self::Qwen,
     ];
 
+    /// The acpx subcommand name for this agent.
     pub(crate) fn key(self) -> &'static str {
         match self {
-            Self::Codex => "codex",
             Self::Claude => "claude",
-            Self::Pi => "pi",
-            Self::OpenCode => "opencode",
+            Self::Codex => "codex",
             Self::Copilot => "copilot",
+            Self::Cursor => "cursor",
+            Self::Droid => "droid",
+            Self::Gemini => "gemini",
+            Self::Iflow => "iflow",
+            Self::Kilocode => "kilocode",
+            Self::Kimi => "kimi",
+            Self::Kiro => "kiro",
+            Self::OpenClaw => "openclaw",
+            Self::OpenCode => "opencode",
+            Self::Pi => "pi",
+            Self::Qwen => "qwen",
         }
     }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Codex => "Codex",
             Self::Claude => "Claude",
-            Self::Pi => "Pi",
-            Self::OpenCode => "OpenCode",
+            Self::Codex => "Codex",
             Self::Copilot => "Copilot",
+            Self::Cursor => "Cursor",
+            Self::Droid => "Droid",
+            Self::Gemini => "Gemini",
+            Self::Iflow => "iFlow",
+            Self::Kilocode => "Kilocode",
+            Self::Kimi => "Kimi",
+            Self::Kiro => "Kiro",
+            Self::OpenClaw => "OpenClaw",
+            Self::OpenCode => "OpenCode",
+            Self::Pi => "Pi",
+            Self::Qwen => "Qwen",
         }
     }
 
     pub(crate) fn fallback_icon(self) -> &'static str {
         match self {
-            Self::Codex => "\u{f121}",
             Self::Claude => "C",
+            Self::Codex => "\u{f121}",   // nf-fa-code
+            Self::Copilot => "\u{f09b}", // nf-fa-github
+            Self::Cursor => "\u{f245}",  // nf-fa-mouse_pointer
+            Self::Droid => "\u{f17b}",   // nf-fa-android
+            Self::Gemini => "G",
+            Self::Iflow => "\u{f126}", // nf-fa-code_fork
+            Self::Kilocode => "K",
+            Self::Kimi => "\u{f005}",     // nf-fa-star
+            Self::Kiro => "\u{f0e7}",     // nf-fa-bolt
+            Self::OpenClaw => "\u{f085}", // nf-fa-cogs
+            Self::OpenCode => "\u{f085}", // nf-fa-cogs
             Self::Pi => "P",
-            Self::OpenCode => "\u{f085}",
-            Self::Copilot => "\u{f09b}",
+            Self::Qwen => "Q",
         }
     }
 
@@ -1156,6 +1258,15 @@ impl AgentPresetKind {
             Self::Pi => "pi",
             Self::OpenCode => "opencode",
             Self::Copilot => "copilot --allow-all",
+            Self::Cursor => "cursor",
+            Self::Droid => "droid",
+            Self::Gemini => "gemini",
+            Self::Iflow => "iflow",
+            Self::Kilocode => "kilocode",
+            Self::Kimi => "kimi",
+            Self::Kiro => "kiro",
+            Self::OpenClaw => "openclaw",
+            Self::Qwen => "qwen",
         }
     }
 
@@ -1165,24 +1276,42 @@ impl AgentPresetKind {
 
     pub(crate) fn from_key(key: &str) -> Option<Self> {
         match key.trim().to_ascii_lowercase().as_str() {
-            "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
-            "pi" => Some(Self::Pi),
-            "opencode" => Some(Self::OpenCode),
+            "codex" => Some(Self::Codex),
             "copilot" => Some(Self::Copilot),
+            "cursor" => Some(Self::Cursor),
+            "droid" => Some(Self::Droid),
+            "gemini" => Some(Self::Gemini),
+            "iflow" => Some(Self::Iflow),
+            "kilocode" => Some(Self::Kilocode),
+            "kimi" => Some(Self::Kimi),
+            "kiro" => Some(Self::Kiro),
+            "openclaw" => Some(Self::OpenClaw),
+            "opencode" => Some(Self::OpenCode),
+            "pi" => Some(Self::Pi),
+            "qwen" => Some(Self::Qwen),
             _ => None,
         }
     }
 
     pub(crate) fn cycle(self, reverse: bool) -> Self {
-        let current = Self::ORDER
+        let installed = installed_preset_kinds();
+        let order: Vec<Self> = Self::ORDER
+            .iter()
+            .copied()
+            .filter(|k| installed.contains(k))
+            .collect();
+        if order.is_empty() {
+            return self;
+        }
+        let current = order
             .iter()
             .position(|candidate| *candidate == self)
             .unwrap_or(0);
         if reverse {
-            Self::ORDER[(current + Self::ORDER.len() - 1) % Self::ORDER.len()]
+            order[(current + order.len() - 1) % order.len()]
         } else {
-            Self::ORDER[(current + 1) % Self::ORDER.len()]
+            order[(current + 1) % order.len()]
         }
     }
 
@@ -1196,6 +1325,176 @@ impl AgentPresetKind {
 pub(crate) struct AgentPreset {
     pub(crate) kind: AgentPresetKind,
     pub(crate) command: String,
+}
+
+/// A model offered by a provider (agent preset), used in the model selector popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentModel {
+    pub(crate) provider: AgentPresetKind,
+    pub(crate) id: &'static str,
+    pub(crate) label: &'static str,
+}
+
+/// A model from an OpenAI-compatible provider configured in config.toml.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct ConfiguredModel {
+    /// Provider name (e.g. "Ollama").
+    pub(crate) provider_name: String,
+    /// Model identifier sent to the API.
+    pub(crate) id: String,
+    /// Human-readable display name.
+    pub(crate) label: String,
+}
+
+/// A provider loaded from `[[providers]]` in config.toml.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfiguredProvider {
+    /// Display name (e.g. "Ollama", "LM Studio").
+    pub(crate) name: String,
+    /// API base URL.
+    pub(crate) base_url: String,
+    /// Resolved API key (from config or env var).
+    pub(crate) api_key: Option<String>,
+    /// Whether to probe `/v1/models` for model discovery.
+    pub(crate) fetch_models: bool,
+    /// Discovered or configured models.
+    pub(crate) models: Vec<ConfiguredModel>,
+}
+
+/// An entry in the model selector popup — either a section header or a model.
+#[derive(Debug, Clone)]
+pub(crate) enum ModelSelectorEntry {
+    /// Section header (provider name).
+    Separator(String),
+    /// An ACP agent model (via acpx).
+    AcpModel(AgentModel),
+    /// An OpenAI-compatible model (from config.toml).
+    ApiModel(ConfiguredModel),
+}
+
+impl AgentPresetKind {
+    /// Models available for each provider.
+    pub(crate) fn models(self) -> &'static [AgentModel] {
+        match self {
+            Self::Claude => &[
+                AgentModel {
+                    provider: Self::Claude,
+                    id: "claude-sonnet-4-20250514",
+                    label: "Claude Sonnet 4",
+                },
+                AgentModel {
+                    provider: Self::Claude,
+                    id: "claude-opus-4-20250514",
+                    label: "Claude Opus 4",
+                },
+                AgentModel {
+                    provider: Self::Claude,
+                    id: "claude-3-5-haiku-20241022",
+                    label: "Claude Haiku 3.5",
+                },
+            ],
+            Self::Codex => &[
+                AgentModel {
+                    provider: Self::Codex,
+                    id: "o4-mini",
+                    label: "o4-mini",
+                },
+                AgentModel {
+                    provider: Self::Codex,
+                    id: "o3",
+                    label: "o3",
+                },
+            ],
+            Self::Copilot => &[AgentModel {
+                provider: Self::Copilot,
+                id: "copilot",
+                label: "Copilot",
+            }],
+            Self::Cursor => &[AgentModel {
+                provider: Self::Cursor,
+                id: "cursor",
+                label: "Cursor",
+            }],
+            Self::Droid => &[AgentModel {
+                provider: Self::Droid,
+                id: "droid",
+                label: "Droid",
+            }],
+            Self::Gemini => &[
+                AgentModel {
+                    provider: Self::Gemini,
+                    id: "gemini-2.5-pro",
+                    label: "Gemini 2.5 Pro",
+                },
+                AgentModel {
+                    provider: Self::Gemini,
+                    id: "gemini-2.5-flash",
+                    label: "Gemini 2.5 Flash",
+                },
+            ],
+            Self::Iflow => &[AgentModel {
+                provider: Self::Iflow,
+                id: "iflow",
+                label: "iFlow",
+            }],
+            Self::Kilocode => &[AgentModel {
+                provider: Self::Kilocode,
+                id: "kilocode",
+                label: "Kilocode",
+            }],
+            Self::Kimi => &[AgentModel {
+                provider: Self::Kimi,
+                id: "kimi",
+                label: "Kimi",
+            }],
+            Self::Kiro => &[AgentModel {
+                provider: Self::Kiro,
+                id: "kiro",
+                label: "Kiro",
+            }],
+            Self::OpenClaw => &[AgentModel {
+                provider: Self::OpenClaw,
+                id: "openclaw",
+                label: "OpenClaw",
+            }],
+            Self::OpenCode => &[AgentModel {
+                provider: Self::OpenCode,
+                id: "opencode",
+                label: "OpenCode",
+            }],
+            Self::Pi => &[AgentModel {
+                provider: Self::Pi,
+                id: "pi",
+                label: "Pi",
+            }],
+            Self::Qwen => &[AgentModel {
+                provider: Self::Qwen,
+                id: "qwen",
+                label: "Qwen",
+            }],
+        }
+    }
+
+    /// Provider display name for section headers.
+    pub(crate) fn provider_name(self) -> &'static str {
+        match self {
+            Self::Claude => "Anthropic",
+            Self::Codex => "OpenAI",
+            Self::Copilot => "GitHub",
+            Self::Cursor => "Cursor",
+            Self::Droid => "Samsung",
+            Self::Gemini => "Google",
+            Self::Iflow => "iFlow",
+            Self::Kilocode => "Kilocode",
+            Self::Kimi => "Moonshot",
+            Self::Kiro => "Amazon",
+            Self::OpenClaw => "OpenClaw",
+            Self::OpenCode => "OpenCode",
+            Self::Pi => "Pi",
+            Self::Qwen => "Alibaba",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1935,6 +2234,8 @@ pub(crate) struct ArborWindow {
     pub(crate) manage_hosts_modal: Option<ManageHostsModal>,
     pub(crate) manage_presets_modal: Option<ManagePresetsModal>,
     pub(crate) agent_presets: Vec<AgentPreset>,
+    /// OpenAI-compatible providers loaded from `[[providers]]` in config.toml.
+    pub(crate) configured_providers: Vec<ConfiguredProvider>,
     pub(crate) active_preset_tab: Option<AgentPresetKind>,
     pub(crate) repo_presets: Vec<RepoPreset>,
     pub(crate) manage_repo_presets_modal: Option<ManageRepoPresetsModal>,
@@ -2017,6 +2318,12 @@ pub(crate) struct ArborWindow {
     pub(crate) agent_chat_scroll_handle: ScrollHandle,
     /// When `Some(local_id)`, the agent selector popup is open for this chat session.
     pub(crate) agent_selector_open_for: Option<u64>,
+    /// Search text for filtering models in the agent selector popup.
+    pub(crate) agent_selector_search: String,
+    /// Cursor position in the agent selector search field.
+    pub(crate) agent_selector_search_cursor: usize,
+    /// When `Some(local_id)`, the chat mode selector popup is open for this chat session.
+    pub(crate) chat_mode_selector_open_for: Option<u64>,
     /// Tracks creation order of center tabs for stable tab bar ordering.
     pub(crate) center_tab_order: Vec<CenterTab>,
     pub(crate) new_tab_menu_position: Option<gpui::Point<Pixels>>,

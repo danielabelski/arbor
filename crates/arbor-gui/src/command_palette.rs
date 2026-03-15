@@ -828,18 +828,12 @@ pub(crate) fn command_palette_preset_icon(
     let icon = preset_icon_image(kind);
     let icon_size = match kind {
         AgentPresetKind::Codex => 22.,
-        AgentPresetKind::Claude
-        | AgentPresetKind::Pi
-        | AgentPresetKind::OpenCode
-        | AgentPresetKind::Copilot => 17.,
+        _ => 17.,
     };
     let fallback_glyph = kind.fallback_icon();
     let fallback_color = match kind {
         AgentPresetKind::Claude => 0xD97757,
-        AgentPresetKind::Codex
-        | AgentPresetKind::Pi
-        | AgentPresetKind::OpenCode
-        | AgentPresetKind::Copilot => theme.text_primary,
+        _ => theme.text_primary,
     };
 
     div()

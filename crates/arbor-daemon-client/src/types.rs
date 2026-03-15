@@ -241,6 +241,19 @@ pub struct AgentChatSessionDto {
     pub output_tokens: u64,
 }
 
+/// Transport used by an agent chat session.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentChatTransport {
+    /// ACP agent via acpx CLI subprocess.
+    Acp,
+    /// OpenAI-compatible HTTP API (Ollama, LM Studio, OpenRouter, etc.).
+    OpenAiChat {
+        base_url: String,
+        api_key: Option<String>,
+    },
+}
+
 /// Request to create a new agent chat session.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CreateAgentChatRequest {
@@ -248,6 +261,12 @@ pub struct CreateAgentChatRequest {
     pub agent_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_prompt: Option<String>,
+    /// Model identifier to pass via `--model` to acpx or as `model` in OpenAI requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Transport to use. Defaults to ACP if omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<AgentChatTransport>,
 }
 
 /// Response from creating an agent chat session.
