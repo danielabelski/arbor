@@ -241,11 +241,14 @@ pub(crate) fn create_command(program: &str) -> Command {
     cmd
 }
 
-/// Explicitly set the dock icon.
+/// Explicitly set the dock icon for dev builds.
 ///
-/// When running inside a `.app` bundle, loads the icon from the bundle resources.
-/// When running via `cargo run` (no bundle), falls back to loading the source PNG
-/// from the `assets/` directory so the dock shows the real icon instead of a folder.
+/// When running inside a `.app` bundle, macOS automatically loads the icon from
+/// `CFBundleIconFile` in Info.plist — we skip `setApplicationIconImage_` entirely
+/// so the system renders the icon at the correct size with proper padding.
+///
+/// When running via `cargo run` (no bundle), the dock shows a generic folder icon,
+/// so we explicitly load the icon from the source assets.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub(crate) fn set_dock_icon() {
@@ -255,26 +258,40 @@ pub(crate) fn set_dock_icon() {
         foundation::NSString as _,
     };
 
+    // If running from a .app bundle, macOS handles the icon natively via
+    // CFBundleIconFile. Calling setApplicationIconImage_ would override the
+    // native rendering and produce a slightly larger icon in the dock.
+    let exe = env::current_exe().ok();
+    let in_app_bundle = exe
+        .as_ref()
+        .and_then(|p| p.to_str())
+        .is_some_and(|s| s.contains(".app/Contents/MacOS/"));
+    if in_app_bundle {
+        return;
+    }
+
     // SAFETY: Cocoa FFI – we call well-known AppKit selectors on the shared
     // NSApplication. GPUI has already initialised the NSApplication before
     // our `run` callback executes.
     unsafe {
-        let icon_name = cocoa::foundation::NSString::alloc(nil).init_str("NSApplicationIcon");
-        let icon: id = NSImage::imageNamed_(nil, icon_name);
-        if icon != nil {
-            NSApp().setApplicationIconImage_(icon);
-            return;
-        }
-
-        // Fallback for development: load the icon PNG from the source tree.
+        // Dev build: load the padded icon from source assets so the dock shows
+        // the real icon instead of a folder. The padded version has ~10% margin
+        // on each side to match the visual size of native bundle icons, since
+        // setApplicationIconImage_ fills the full dock tile without the padding
+        // that macOS applies to bundled icons.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let icon_path = format!("{manifest_dir}/../../assets/icons/arbor-icon-1024.png");
-        if let Ok(canonical) = fs::canonicalize(&icon_path) {
-            let path_str = canonical.to_string_lossy();
-            let ns_path = cocoa::foundation::NSString::alloc(nil).init_str(&path_str);
-            let icon: id = NSImage::alloc(nil).initWithContentsOfFile_(ns_path);
-            if icon != nil {
-                NSApp().setApplicationIconImage_(icon);
+        let padded_path = format!("{manifest_dir}/../../assets/icons/arbor-icon-1024-padded.png");
+        let fallback_path = format!("{manifest_dir}/../../assets/icons/arbor-icon-1024.png");
+
+        for path in [&padded_path, &fallback_path] {
+            if let Ok(canonical) = fs::canonicalize(path) {
+                let path_str = canonical.to_string_lossy();
+                let ns_path = cocoa::foundation::NSString::alloc(nil).init_str(&path_str);
+                let icon: id = NSImage::alloc(nil).initWithContentsOfFile_(ns_path);
+                if icon != nil {
+                    NSApp().setApplicationIconImage_(icon);
+                    return;
+                }
             }
         }
     }
