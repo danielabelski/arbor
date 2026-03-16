@@ -1051,6 +1051,7 @@ pub(crate) struct AgentChatMessage {
 
 /// Local state for an agent chat session displayed in the native GUI.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "agent-chat"), allow(dead_code))]
 pub(crate) struct NativeAgentChatSession {
     /// Local numeric ID for use in `CenterTab::AgentChat`.
     pub(crate) local_id: u64,
@@ -1369,6 +1370,7 @@ pub(crate) struct ConfiguredModel {
 
 /// A provider loaded from `[[providers]]` in config.toml.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "agent-chat"), allow(dead_code))]
 pub(crate) struct ConfiguredProvider {
     /// Display name (e.g. "Ollama", "LM Studio").
     pub(crate) name: String,
@@ -2334,6 +2336,7 @@ pub(crate) struct ArborWindow {
     pub(crate) collapsed_repositories: HashSet<usize>,
     pub(crate) agent_chat_sessions: Vec<NativeAgentChatSession>,
     pub(crate) active_agent_chat_by_worktree: HashMap<PathBuf, u64>,
+    #[cfg_attr(not(feature = "agent-chat"), allow(dead_code))]
     pub(crate) next_agent_chat_id: u64,
     pub(crate) agent_chat_scroll_handle: ScrollHandle,
     /// When `Some(local_id)`, the agent selector popup is open for this chat session.

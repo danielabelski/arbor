@@ -1083,6 +1083,7 @@ impl ArborWindow {
                 .retain(|_, id| *id != local_id);
 
             // Kill the session on the daemon in background
+            #[cfg(feature = "agent-chat")]
             if let Some(daemon) = self.terminal_daemon.as_ref() {
                 let client = daemon.clone();
                 let session_id = session.session_id.clone();
@@ -1091,6 +1092,9 @@ impl ArborWindow {
                 })
                 .detach();
             }
+
+            #[cfg(not(feature = "agent-chat"))]
+            let _ = session;
             cx.notify();
         }
     }

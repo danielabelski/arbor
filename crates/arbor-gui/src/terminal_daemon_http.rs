@@ -197,6 +197,7 @@ pub enum AgentChatTransport {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(not(feature = "agent-chat"), allow(dead_code))]
 struct AgentChatCreateRequest {
     workspace_path: String,
     agent_kind: String,
@@ -209,11 +210,13 @@ struct AgentChatCreateRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "agent-chat"), allow(dead_code))]
 pub struct AgentChatCreateResponse {
     pub session_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(not(feature = "agent-chat"), allow(dead_code))]
 pub struct AgentChatSessionSummary {
     pub id: String,
     pub agent_kind: String,
@@ -226,6 +229,7 @@ pub struct AgentChatSessionSummary {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(not(feature = "agent-chat"), allow(dead_code))]
 struct DiscoverModelsRequest {
     base_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,22 +238,26 @@ struct DiscoverModelsRequest {
 
 /// A model discovered from an OpenAI-compatible `/v1/models` endpoint.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(not(feature = "agent-chat"), allow(dead_code))]
 pub struct DiscoveredModelDto {
     pub id: String,
     pub display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "agent-chat"), allow(dead_code))]
 struct DiscoverModelsResponse {
     models: Vec<DiscoveredModelDto>,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(not(feature = "agent-chat"), allow(dead_code))]
 struct AgentChatSendRequest {
     message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(not(feature = "agent-chat"), allow(dead_code))]
 pub struct AgentChatMessageDto {
     pub role: String,
     pub content: String,
@@ -396,6 +404,7 @@ impl HttpTerminalDaemon {
         self.websocket_connect_config(&path)
     }
 
+    #[cfg(feature = "agent-chat")]
     pub fn agent_chat_websocket_config(
         &self,
         session_id: &str,
@@ -586,6 +595,7 @@ impl HttpTerminalDaemon {
         self.expect_status(response, &[200])
     }
 
+    #[cfg(feature = "agent-chat")]
     pub fn create_agent_chat(
         &self,
         workspace_path: &str,
@@ -606,6 +616,7 @@ impl HttpTerminalDaemon {
         self.decode_json_response(response, &[200])
     }
 
+    #[cfg(feature = "agent-chat")]
     pub fn list_agent_chats(
         &self,
     ) -> Result<Vec<AgentChatSessionSummary>, HttpTerminalDaemonError> {
@@ -613,6 +624,7 @@ impl HttpTerminalDaemon {
         self.decode_json_response(response, &[200])
     }
 
+    #[cfg(feature = "agent-chat")]
     pub fn kill_agent_chat(&self, session_id: &str) -> Result<(), HttpTerminalDaemonError> {
         let encoded = percent_encode_path(session_id);
         let response =
@@ -620,6 +632,7 @@ impl HttpTerminalDaemon {
         self.expect_status(response, &[200])
     }
 
+    #[cfg(feature = "agent-chat")]
     pub fn send_agent_message(
         &self,
         session_id: &str,
@@ -637,6 +650,7 @@ impl HttpTerminalDaemon {
         self.expect_status(response, &[200])
     }
 
+    #[cfg(feature = "agent-chat")]
     pub fn cancel_agent_chat(&self, session_id: &str) -> Result<(), HttpTerminalDaemonError> {
         let encoded = percent_encode_path(session_id);
         let response = self.send_empty(
@@ -647,6 +661,7 @@ impl HttpTerminalDaemon {
     }
 
     /// Probe an OpenAI-compatible provider's `/v1/models` endpoint via the daemon.
+    #[cfg(feature = "agent-chat")]
     pub fn discover_models(
         &self,
         base_url: &str,
@@ -849,6 +864,7 @@ pub trait TerminalDaemonClient: Send + Sync + fmt::Debug {
         &self,
         session_id: &str,
     ) -> Result<WebsocketConnectConfig, HttpTerminalDaemonError>;
+    #[cfg(feature = "agent-chat")]
     fn agent_chat_websocket_config(
         &self,
         session_id: &str,
@@ -887,6 +903,7 @@ pub trait TerminalDaemonClient: Send + Sync + fmt::Debug {
     ) -> Result<WorktreeMutationResponseDto, HttpTerminalDaemonError>;
     fn shutdown(&self) -> Result<(), HttpTerminalDaemonError>;
     fn set_bind_mode(&self, allow_remote: bool) -> Result<(), HttpTerminalDaemonError>;
+    #[cfg(feature = "agent-chat")]
     fn create_agent_chat(
         &self,
         workspace_path: &str,
@@ -895,14 +912,19 @@ pub trait TerminalDaemonClient: Send + Sync + fmt::Debug {
         model_id: Option<&str>,
         transport: Option<AgentChatTransport>,
     ) -> Result<AgentChatCreateResponse, HttpTerminalDaemonError>;
+    #[cfg(feature = "agent-chat")]
     fn list_agent_chats(&self) -> Result<Vec<AgentChatSessionSummary>, HttpTerminalDaemonError>;
+    #[cfg(feature = "agent-chat")]
     fn kill_agent_chat(&self, session_id: &str) -> Result<(), HttpTerminalDaemonError>;
+    #[cfg(feature = "agent-chat")]
     fn send_agent_message(
         &self,
         session_id: &str,
         message: &str,
     ) -> Result<(), HttpTerminalDaemonError>;
+    #[cfg(feature = "agent-chat")]
     fn cancel_agent_chat(&self, session_id: &str) -> Result<(), HttpTerminalDaemonError>;
+    #[cfg(feature = "agent-chat")]
     fn discover_models(
         &self,
         base_url: &str,
@@ -933,6 +955,7 @@ impl TerminalDaemonClient for HttpTerminalDaemon {
         HttpTerminalDaemon::terminal_websocket_config(self, session_id)
     }
 
+    #[cfg(feature = "agent-chat")]
     fn agent_chat_websocket_config(
         &self,
         session_id: &str,
@@ -1022,6 +1045,7 @@ impl TerminalDaemonClient for HttpTerminalDaemon {
         HttpTerminalDaemon::set_bind_mode(self, allow_remote)
     }
 
+    #[cfg(feature = "agent-chat")]
     fn create_agent_chat(
         &self,
         workspace_path: &str,
@@ -1040,14 +1064,17 @@ impl TerminalDaemonClient for HttpTerminalDaemon {
         )
     }
 
+    #[cfg(feature = "agent-chat")]
     fn list_agent_chats(&self) -> Result<Vec<AgentChatSessionSummary>, HttpTerminalDaemonError> {
         HttpTerminalDaemon::list_agent_chats(self)
     }
 
+    #[cfg(feature = "agent-chat")]
     fn kill_agent_chat(&self, session_id: &str) -> Result<(), HttpTerminalDaemonError> {
         HttpTerminalDaemon::kill_agent_chat(self, session_id)
     }
 
+    #[cfg(feature = "agent-chat")]
     fn send_agent_message(
         &self,
         session_id: &str,
@@ -1056,10 +1083,12 @@ impl TerminalDaemonClient for HttpTerminalDaemon {
         HttpTerminalDaemon::send_agent_message(self, session_id, message)
     }
 
+    #[cfg(feature = "agent-chat")]
     fn cancel_agent_chat(&self, session_id: &str) -> Result<(), HttpTerminalDaemonError> {
         HttpTerminalDaemon::cancel_agent_chat(self, session_id)
     }
 
+    #[cfg(feature = "agent-chat")]
     fn discover_models(
         &self,
         base_url: &str,
