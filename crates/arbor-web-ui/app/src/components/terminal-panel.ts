@@ -58,6 +58,8 @@ let tabsContainer: HTMLElement | null = null;
 let terminalContainer: HTMLElement | null = null;
 let agentContainer: HTMLElement | null = null;
 let statusEl: HTMLElement | null = null;
+let addMenuAnchor: HTMLElement | null = null;
+let addMenuEl: HTMLElement | null = null;
 
 // Agents that should use integrated chat UI instead of terminal
 const AGENT_CHAT_KINDS = new Set(["claude", "codex"]);
@@ -81,10 +83,45 @@ export function createTerminalPanel(): HTMLElement {
     presetGroup.append(btn);
   }
 
+  addMenuAnchor = el("div", "terminal-add-menu-anchor");
   const addBtn = el("button", "terminal-add-btn", "+");
-  addBtn.title = "New terminal";
-  addBtn.addEventListener("click", openNewTerminal);
-  toolbar.append(tabsContainer, presetGroup, addBtn);
+  addBtn.title = "New terminal or agent chat";
+  addBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setAddMenuVisible(!(addMenuEl?.classList.contains("open") ?? false));
+  });
+
+  addMenuEl = el("div", "terminal-add-menu");
+
+  const terminalOption = el("button", "terminal-add-menu-item");
+  terminalOption.type = "button";
+  terminalOption.append(
+    el("span", "terminal-tab-icon"),
+    el("span", "terminal-add-menu-label", "Terminal"),
+  );
+  terminalOption.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    setAddMenuVisible(false);
+    await openNewTerminal();
+  });
+
+  const agentOption = el("button", "terminal-add-menu-item");
+  agentOption.type = "button";
+  agentOption.append(
+    el("span", "terminal-add-menu-agent-icon", "AI"),
+    el("span", "terminal-add-menu-label", "Agent Chat"),
+  );
+  agentOption.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    setAddMenuVisible(false);
+    await openNewAgentChat();
+  });
+
+  addMenuEl.append(terminalOption, el("div", "terminal-add-menu-separator"), agentOption);
+  addMenuAnchor.append(addBtn, addMenuEl);
+  addMenuAnchor.addEventListener("mouseenter", () => setAddMenuVisible(true));
+  addMenuAnchor.addEventListener("mouseleave", () => setAddMenuVisible(false));
+  toolbar.append(tabsContainer, presetGroup, addMenuAnchor);
 
   // Terminal container (for xterm)
   terminalContainer = el("div", "terminal-container");
@@ -572,6 +609,26 @@ async function openNewTerminal(): Promise<void> {
       `Failed: ${error instanceof Error ? error.message : "unknown error"}`,
     );
   }
+}
+
+async function openNewAgentChat(): Promise<void> {
+  const worktreePath = state.selectedWorktreePath;
+  if (worktreePath === null) return;
+
+  try {
+    const result = await createAgentChat(worktreePath, "claude");
+    await refresh();
+    activateTab(agentTabId(result.sessionId));
+  } catch (error) {
+    setStatus(
+      `Failed: ${error instanceof Error ? error.message : "unknown error"}`,
+    );
+  }
+}
+
+function setAddMenuVisible(visible: boolean): void {
+  if (addMenuEl === null) return;
+  addMenuEl.classList.toggle("open", visible);
 }
 
 function setStatus(text: string): void {

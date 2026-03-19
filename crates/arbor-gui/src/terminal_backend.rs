@@ -5,7 +5,7 @@ use {
     crate::TerminalError,
     arbor_terminal_emulator::{
         self, TERMINAL_COLS, TERMINAL_DEFAULT_BG, TERMINAL_DEFAULT_FG, TERMINAL_ROWS,
-        TerminalEmulator, TerminalSnapshot, process_terminal_bytes,
+        TerminalEmulator, TerminalSnapshot,
     },
     portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system},
     std::{
@@ -37,6 +37,7 @@ pub struct EmbeddedTerminal {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     emulator: Arc<Mutex<TerminalEmulator>>,
+    snapshot: Arc<Mutex<EmbeddedSnapshot>>,
     exit_code: Arc<Mutex<Option<i32>>>,
     root_pid: Option<u32>,
     generation: Arc<AtomicU64>,
@@ -133,16 +134,26 @@ impl EmbeddedTerminal {
         let master = pair.master;
 
         let emulator = Arc::new(Mutex::new(TerminalEmulator::with_size(rows, cols)));
+        let snapshot = Arc::new(Mutex::new(empty_embedded_snapshot()));
         let exit_code = Arc::new(Mutex::new(None));
         let generation = Arc::new(AtomicU64::new(1));
         let killer = Arc::new(Mutex::new(Some(killer)));
         let size = Arc::new(Mutex::new((rows, cols, 0, 0)));
         let notify: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>> = Arc::new(Mutex::new(None));
 
-        spawn_reader_thread(reader, emulator.clone(), generation.clone(), notify.clone());
+        refresh_embedded_snapshot_cache(&emulator, &snapshot, None);
+
+        spawn_reader_thread(
+            reader,
+            emulator.clone(),
+            snapshot.clone(),
+            generation.clone(),
+            notify.clone(),
+        );
         spawn_wait_thread(
             child,
             emulator.clone(),
+            snapshot.clone(),
             exit_code.clone(),
             killer.clone(),
             generation.clone(),
@@ -153,6 +164,7 @@ impl EmbeddedTerminal {
             writer: Arc::new(Mutex::new(writer)),
             master: Arc::new(Mutex::new(master)),
             emulator,
+            snapshot,
             exit_code,
             root_pid,
             generation,
@@ -180,21 +192,9 @@ impl EmbeddedTerminal {
     }
 
     pub fn snapshot(&self) -> EmbeddedSnapshot {
-        let snapshot = match self.emulator.lock() {
-            Ok(emulator) => emulator.snapshot(),
-            Err(poisoned) => poisoned.into_inner().snapshot(),
-        };
-        let exit_code = match self.exit_code.lock() {
-            Ok(code) => *code,
-            Err(poisoned) => *poisoned.into_inner(),
-        };
-
-        EmbeddedSnapshot {
-            output: snapshot.output,
-            styled_lines: snapshot.styled_lines,
-            cursor: snapshot.cursor,
-            modes: snapshot.modes,
-            exit_code,
+        match self.snapshot.lock() {
+            Ok(snapshot) => snapshot.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
         }
     }
 
@@ -227,6 +227,15 @@ impl EmbeddedTerminal {
                 .map_err(|_| TerminalError::LockPoisoned("emulator"))?;
             emulator.resize(rows, cols);
         }
+        refresh_embedded_snapshot_cache(
+            &self.emulator,
+            &self.snapshot,
+            self.exit_code
+                .lock()
+                .ok()
+                .map(|guard| *guard)
+                .unwrap_or(None),
+        );
 
         {
             let master = self
@@ -310,6 +319,7 @@ fn send_notify(notify: &Mutex<Option<std::sync::mpsc::Sender<()>>>) {
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     emulator: Arc<Mutex<TerminalEmulator>>,
+    snapshot: Arc<Mutex<EmbeddedSnapshot>>,
     generation: Arc<AtomicU64>,
     notify: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
 ) {
@@ -320,14 +330,22 @@ fn spawn_reader_thread(
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => {
-                    process_terminal_bytes(&emulator, &generation, &buffer[..read]);
+                    process_embedded_terminal_bytes(
+                        &emulator,
+                        &snapshot,
+                        &generation,
+                        &buffer[..read],
+                        None,
+                    );
                     send_notify(&notify);
                 },
                 Err(error) => {
-                    process_terminal_bytes(
+                    process_embedded_terminal_bytes(
                         &emulator,
+                        &snapshot,
                         &generation,
                         format!("\r\n[terminal reader error: {error}]\r\n").as_bytes(),
+                        None,
                     );
                     send_notify(&notify);
                     break;
@@ -340,6 +358,7 @@ fn spawn_reader_thread(
 fn spawn_wait_thread(
     child: Box<dyn Child + Send + Sync>,
     emulator: Arc<Mutex<TerminalEmulator>>,
+    snapshot: Arc<Mutex<EmbeddedSnapshot>>,
     exit_code: Arc<Mutex<Option<i32>>>,
     killer: Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
     generation: Arc<AtomicU64>,
@@ -377,9 +396,73 @@ fn spawn_wait_thread(
             *killer_guard = None;
         }
 
-        process_terminal_bytes(&emulator, &generation, exit_message.as_bytes());
+        process_embedded_terminal_bytes(
+            &emulator,
+            &snapshot,
+            &generation,
+            exit_message.as_bytes(),
+            final_code,
+        );
         send_notify(&notify);
     });
+}
+
+fn empty_embedded_snapshot() -> EmbeddedSnapshot {
+    EmbeddedSnapshot {
+        output: String::new(),
+        styled_lines: vec![TerminalStyledLine {
+            cells: Vec::new(),
+            runs: Vec::new(),
+        }],
+        cursor: None,
+        modes: TerminalModes::default(),
+        exit_code: None,
+    }
+}
+
+fn refresh_embedded_snapshot_cache(
+    emulator: &Mutex<TerminalEmulator>,
+    snapshot: &Mutex<EmbeddedSnapshot>,
+    exit_code: Option<i32>,
+) {
+    let mut next_snapshot = match emulator.lock() {
+        Ok(emulator) => emulator.snapshot(),
+        Err(poisoned) => poisoned.into_inner().snapshot(),
+    };
+    next_snapshot.exit_code = exit_code;
+
+    match snapshot.lock() {
+        Ok(mut cached) => *cached = next_snapshot,
+        Err(poisoned) => *poisoned.into_inner() = next_snapshot,
+    }
+}
+
+fn process_embedded_terminal_bytes(
+    emulator: &Mutex<TerminalEmulator>,
+    snapshot: &Mutex<EmbeddedSnapshot>,
+    generation: &AtomicU64,
+    bytes: &[u8],
+    exit_code: Option<i32>,
+) {
+    let mut next_snapshot = match emulator.lock() {
+        Ok(mut emulator) => {
+            emulator.process(bytes);
+            emulator.snapshot()
+        },
+        Err(poisoned) => {
+            let mut emulator = poisoned.into_inner();
+            emulator.process(bytes);
+            emulator.snapshot()
+        },
+    };
+    next_snapshot.exit_code = exit_code;
+
+    match snapshot.lock() {
+        Ok(mut cached) => *cached = next_snapshot,
+        Err(poisoned) => *poisoned.into_inner() = next_snapshot,
+    }
+
+    generation.fetch_add(1, Ordering::Relaxed);
 }
 
 fn default_shell() -> String {
@@ -466,6 +549,26 @@ mod tests {
 
         emulator.process("\u{1b}[?25h".as_bytes());
         assert!(emulator.snapshot_cursor().is_some());
+    }
+
+    #[test]
+    fn embedded_snapshot_cache_tracks_exit_code() {
+        let emulator = Mutex::new(TerminalEmulator::new());
+        let snapshot = Mutex::new(empty_embedded_snapshot());
+
+        process_embedded_terminal_bytes(
+            &emulator,
+            &snapshot,
+            &AtomicU64::new(0),
+            b"hello\r\n",
+            Some(7),
+        );
+
+        let cached = snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(cached.exit_code, Some(7));
+        assert!(cached.output.contains("hello"));
     }
 
     fn styled_line_to_string(line: Option<&TerminalStyledLine>) -> String {

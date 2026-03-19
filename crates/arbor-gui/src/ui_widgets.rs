@@ -64,6 +64,12 @@ pub(crate) enum ActionButtonStyle {
     Secondary,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum StatusMetricIconKind {
+    Cpu,
+    Memory,
+}
+
 /// Return the icon image for a preset kind, if one exists.
 /// Returns `None` for agents without custom icon assets.
 pub(crate) fn preset_icon_image(kind: AgentPresetKind) -> Arc<Image> {
@@ -521,6 +527,86 @@ pub(crate) fn status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
         .child(text.into())
 }
 
+pub(crate) fn status_metric_icon(theme: ThemePalette, kind: StatusMetricIconKind) -> Div {
+    let color = theme.text_muted;
+    let label = kind.fallback_label();
+    let icon = status_metric_icon_image(kind, color);
+
+    div()
+        .size(px(12.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            img(icon)
+                .size(px(12.))
+                .with_fallback(move || status_text(theme, label).into_any_element()),
+        )
+}
+
+fn status_metric_icon_image(kind: StatusMetricIconKind, color: u32) -> Arc<Image> {
+    static ICONS: OnceLock<Mutex<HashMap<(StatusMetricIconKind, u32), Arc<Image>>>> =
+        OnceLock::new();
+    let map = ICONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = map.lock().unwrap_or_else(|error| error.into_inner());
+
+    map.entry((kind, color))
+        .or_insert_with(|| {
+            Arc::new(Image::from_bytes(
+                ImageFormat::Svg,
+                status_metric_icon_svg(kind, color).into_bytes(),
+            ))
+        })
+        .clone()
+}
+
+fn status_metric_icon_svg(kind: StatusMetricIconKind, color: u32) -> String {
+    let stroke = format!("#{:06X}", color);
+
+    match kind {
+        StatusMetricIconKind::Cpu => format!(
+            r##"<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="{stroke}" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4.25" y="4.25" width="7.5" height="7.5" rx="1.4"/>
+  <path d="M6.75 6.75h2.5v2.5h-2.5z"/>
+  <path d="M6.5 1.75v1.5"/>
+  <path d="M9.5 1.75v1.5"/>
+  <path d="M6.5 12.75v1.5"/>
+  <path d="M9.5 12.75v1.5"/>
+  <path d="M1.75 6.5h1.5"/>
+  <path d="M1.75 9.5h1.5"/>
+  <path d="M12.75 6.5h1.5"/>
+  <path d="M12.75 9.5h1.5"/>
+</svg>"##
+        ),
+        StatusMetricIconKind::Memory => format!(
+            r##"<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="{stroke}" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="2.25" y="4.25" width="11.5" height="7.5" rx="1.5"/>
+  <path d="M4.75 6.5h6.5"/>
+  <path d="M4.75 8h6.5"/>
+  <path d="M4.75 9.5h3.5"/>
+  <path d="M4.5 2.5v1.5"/>
+  <path d="M7 2.5v1.5"/>
+  <path d="M9.5 2.5v1.5"/>
+  <path d="M12 2.5v1.5"/>
+  <path d="M4.5 12v1.5"/>
+  <path d="M7 12v1.5"/>
+  <path d="M9.5 12v1.5"/>
+  <path d="M12 12v1.5"/>
+</svg>"##
+        ),
+    }
+}
+
+impl StatusMetricIconKind {
+    fn fallback_label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::Memory => "MEM",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct WorktreeAttentionIndicator {
     pub(crate) label: &'static str,
@@ -812,5 +898,18 @@ mod tests {
 
         assert!(expanded > collapsed);
         assert!(expanded_bounds.size.height > collapsed_bounds.size.height);
+    }
+
+    #[test]
+    fn status_metric_icon_svg_uses_non_private_use_shapes() {
+        let cpu_svg = status_metric_icon_svg(StatusMetricIconKind::Cpu, 0x8A8986);
+        let memory_svg = status_metric_icon_svg(StatusMetricIconKind::Memory, 0x8A8986);
+
+        assert!(cpu_svg.contains("<svg"));
+        assert!(cpu_svg.contains("#8A8986"));
+        assert!(!cpu_svg.contains("f2db"));
+        assert!(memory_svg.contains("<svg"));
+        assert!(memory_svg.contains("#8A8986"));
+        assert!(!memory_svg.contains("f538"));
     }
 }

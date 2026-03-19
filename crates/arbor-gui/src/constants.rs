@@ -93,6 +93,7 @@ pub(crate) const GITHUB_AUTH_COPY_FEEDBACK_DURATION: Duration = Duration::from_m
 pub(crate) const CONFIG_AUTO_REFRESH_INTERVAL: Duration = Duration::from_millis(600);
 pub(crate) const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 14;
 pub(crate) const ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(250);
+pub(crate) const ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL: Duration = Duration::from_millis(50);
 pub(crate) const ACTIVE_SSH_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(90);
 pub(crate) const INACTIVE_SSH_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(250);
 pub(crate) const ACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(250);

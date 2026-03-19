@@ -933,12 +933,12 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
         let current_generation = self.ws_state.event_generation();
         let last_synced_generation = self.last_synced_ws_generation.load(Ordering::Relaxed);
         if current_generation > last_synced_generation {
-            return is_active
-                || runtime_sync_interval_elapsed(
-                    session.last_runtime_sync_at,
-                    self.sync_interval(false, session.state),
-                    now,
-                );
+            let interval = if is_active {
+                ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL
+            } else {
+                self.sync_interval(false, session.state)
+            };
+            return runtime_sync_interval_elapsed(session.last_runtime_sync_at, interval, now);
         }
 
         runtime_sync_interval_elapsed(

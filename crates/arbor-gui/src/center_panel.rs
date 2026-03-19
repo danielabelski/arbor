@@ -6,7 +6,7 @@ use super::*;
 fn new_tab_button_handler(
     this: &mut ArborWindow,
     event: &MouseDownEvent,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<ArborWindow>,
 ) {
     this.new_tab_menu_position = if this.new_tab_menu_position.is_some() {
@@ -14,8 +14,34 @@ fn new_tab_button_handler(
     } else {
         Some(event.position)
     };
+    window.focus(&this.terminal_focus);
+    this.focus_terminal_on_next_render = false;
     cx.stop_propagation();
     cx.notify();
+}
+
+#[cfg(feature = "agent-chat")]
+fn new_tab_button_hover_handler(
+    this: &mut ArborWindow,
+    hovered: &bool,
+    window: &mut Window,
+    cx: &mut Context<ArborWindow>,
+) {
+    if *hovered && this.new_tab_menu_position.is_none() {
+        this.new_tab_menu_position = Some(window.mouse_position());
+        window.focus(&this.terminal_focus);
+        this.focus_terminal_on_next_render = false;
+        cx.notify();
+    }
+}
+
+#[cfg(not(feature = "agent-chat"))]
+fn new_tab_button_hover_handler(
+    _this: &mut ArborWindow,
+    _hovered: &bool,
+    _window: &mut Window,
+    _cx: &mut Context<ArborWindow>,
+) {
 }
 
 #[cfg(not(feature = "agent-chat"))]
@@ -244,6 +270,7 @@ impl ArborWindow {
                                             .text_sm()
                                             .text_color(rgb(theme.text_muted))
                                             .hover(|this| this.text_color(rgb(theme.text_primary)))
+                                            .on_hover(cx.listener(new_tab_button_hover_handler))
                                             .child("+")
                                             .on_mouse_down(
                                                 MouseButton::Left,
@@ -829,6 +856,7 @@ impl ArborWindow {
                     .left(position.x)
                     .top(position.y + px(8.))
                     .w(px(200.))
+                    .px(px(4.))
                     .py(px(4.))
                     .rounded_md()
                     .border_1()
@@ -846,11 +874,15 @@ impl ArborWindow {
                             .id("new-tab-terminal")
                             .h(px(30.))
                             .w_full()
-                            .mx(px(4.))
                             .px(px(8.))
                             .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.chrome_bg))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .hover(|this| {
+                                this.bg(rgb(theme.panel_active_bg))
+                                    .border_color(rgb(theme.accent))
+                            })
                             .flex()
                             .items_center()
                             .gap(px(8.))
@@ -882,11 +914,15 @@ impl ArborWindow {
                             .id("new-tab-agent-chat")
                             .h(px(30.))
                             .w_full()
-                            .mx(px(4.))
                             .px(px(8.))
                             .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.chrome_bg))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .hover(|this| {
+                                this.bg(rgb(theme.panel_active_bg))
+                                    .border_color(rgb(theme.accent))
+                            })
                             .flex()
                             .items_center()
                             .gap(px(8.))

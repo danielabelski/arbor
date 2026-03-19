@@ -1309,7 +1309,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn daemon_runtime_syncs_active_session_immediately_on_ws_event() {
+    fn daemon_runtime_coalesces_active_session_ws_bursts() {
         let runtime = daemon_runtime_for_test();
         let mut session = session_with_styled_line("prompt", 0xffffff, 0x000000, None);
         let now = Instant::now();
@@ -1319,7 +1319,13 @@ pub(crate) mod tests {
 
         runtime.ws_state.note_event();
 
-        assert!(runtime.should_sync(&session, true, None, now));
+        assert!(!runtime.should_sync(&session, true, None, now));
+        assert!(runtime.should_sync(
+            &session,
+            true,
+            None,
+            now + ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL
+        ));
     }
 
     #[test]

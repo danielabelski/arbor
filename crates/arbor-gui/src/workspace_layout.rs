@@ -669,14 +669,14 @@ impl ArborWindow {
                     .when_some(self.self_cpu_percent, |this, percent| {
                         this.child(status_text(theme, "•")).child(status_metric(
                             theme,
-                            "\u{f2db}",
+                            status_metric_icon(theme, StatusMetricIconKind::Cpu),
                             format_cpu_percent(percent),
                         ))
                     })
                     .when_some(self.self_memory_bytes, |this, bytes| {
                         this.child(status_text(theme, "•")).child(status_metric(
                             theme,
-                            "\u{f538}",
+                            status_metric_icon(theme, StatusMetricIconKind::Memory),
                             format_memory_bytes(bytes),
                         ))
                     })
@@ -727,12 +727,12 @@ impl ArborWindow {
     }
 }
 
-fn status_metric(theme: ThemePalette, icon: &'static str, value: impl Into<String>) -> Div {
+fn status_metric(theme: ThemePalette, icon: impl IntoElement, value: impl Into<String>) -> Div {
     div()
         .flex()
         .items_center()
         .gap_1()
-        .child(status_text(theme, icon))
+        .child(icon)
         .child(status_text(theme, value))
 }
 
