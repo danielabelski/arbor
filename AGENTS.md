@@ -96,6 +96,7 @@ All dependency versions live in the root `Cargo.toml` `[workspace.dependencies]`
   1. Subject line: concise, imperative, and specific about the user-visible or architectural change.
   2. Blank line.
   3. Body: short paragraphs or bullets explaining why the change was needed, what changed, and any important constraints, follow-ups, or migrations.
+- Wrap commit message text. Keep the subject short, and wrap body lines to roughly 72 columns so `git log` and terminal tools stay readable.
 - The body should capture the reasoning that will matter in `git log` six months later, not just restate the diff.
 - Call out behavior changes, fallback paths, performance work, or bug triggers explicitly when they motivated the change.
 - If validation was important, mention the key checks in the body instead of making reviewers guess.
