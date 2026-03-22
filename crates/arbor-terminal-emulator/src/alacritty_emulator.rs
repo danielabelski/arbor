@@ -271,6 +271,146 @@ mod tests {
     }
 
     #[test]
+    fn cursor_relative_redraw_replaces_prompt_lines_cleanly() {
+        let mut emulator = TerminalEmulator::with_size(12, 72);
+        let initial = concat!(
+            "  Would you like to make the following edits?\r\n",
+            "\r\n",
+            "  crates/arbor-gui/src/app_init.rs (+4 -0)\r\n",
+            "    223  -        self.terminal_scroll_handle: ScrollHandle::new(),\r\n",
+            "    224  +        terminal_follow_output_until: None,\r\n",
+            "    225  +        last_terminal_scroll_offset_y: None,\r\n",
+            "\r\n",
+            "  1. Yes, proceed (y)\r\n",
+            "› 2. Yes, and don't ask again for these files (a)\r\n",
+            "  3. No, and tell Codex what to do differently (esc)",
+        );
+        let redraw = concat!(
+            "\x1b[3A",
+            "\r\x1b[2K  1. Yes, proceed (y)",
+            "\x1b[1B",
+            "\r\x1b[2K› 2. Yes, and don't ask again for these files (a)",
+            "\x1b[1B",
+            "\r\x1b[2K  3. No, and tell Codex what to do differently (esc)",
+        );
+
+        let _ = emulator.process_and_report(initial.as_bytes());
+        let _ = emulator.process_and_report(redraw.as_bytes());
+
+        let snapshot = emulator.snapshot_output();
+        assert!(
+            snapshot.contains("Would you like to make the following edits?"),
+            "expected prompt header to survive redraws: {snapshot:?}"
+        );
+        assert!(
+            snapshot.contains("terminal_follow_output_until: None"),
+            "expected file diff content to remain intact: {snapshot:?}"
+        );
+        assert!(
+            snapshot.contains("› 2. Yes, and don't ask again for these files (a)"),
+            "expected selected option to render cleanly after redraw: {snapshot:?}"
+        );
+        assert!(
+            snapshot.contains("  3. No, and tell Codex what to do differently (esc)"),
+            "expected final menu option to remain readable: {snapshot:?}"
+        );
+        assert!(
+            !snapshot.contains("1. Yes, and don't ask again"),
+            "unexpected prompt line bleed after redraw: {snapshot:?}"
+        );
+    }
+
+    #[test]
+    fn clear_screen_snapshot_preserves_blank_rows_for_visible_screen() {
+        let mut emulator = TerminalEmulator::with_size(12, 72);
+        let frame = concat!(
+            "\x1b[H\x1b[2J",
+            "  Would you like to make the following edits?\r\n",
+            "\r\n",
+            "  crates/arbor-gui/src/app_init.rs (+4 -0)\r\n",
+            "    223  -        self.terminal_scroll_handle: ScrollHandle::new(),\r\n",
+            "    224  +        terminal_follow_output_until: None,\r\n",
+            "    225  +        last_terminal_scroll_offset_y: None,\r\n",
+            "\r\n",
+            "  1. Yes, proceed (y)\r\n",
+            "› 2. Yes, and don't ask again for these files (a)\r\n",
+            "  3. No, and tell Codex what to do differently (esc)",
+        );
+
+        let _ = emulator.process_and_report(frame.as_bytes());
+
+        let snapshot = emulator.snapshot();
+        assert!(
+            snapshot.styled_lines.len() >= 12,
+            "expected visible screen rows to remain in snapshot: {:?}",
+            snapshot.styled_lines
+        );
+        assert!(
+            snapshot
+                .styled_lines
+                .iter()
+                .take(2)
+                .any(|line| styled_line_to_string(Some(line))
+                    .contains("Would you like to make the following edits?")),
+            "expected prompt header to remain at the top of the visible frame: {:?}",
+            snapshot.styled_lines
+        );
+        assert!(
+            snapshot
+                .styled_lines
+                .last()
+                .is_some_and(|line| line.cells.is_empty()),
+            "expected trailing blank screen rows to remain in snapshot: {:?}",
+            snapshot.styled_lines
+        );
+        assert_eq!(
+            snapshot.cursor.map(|cursor| cursor.line),
+            Some(10),
+            "expected cursor to stay on the active prompt option: {:?}",
+            snapshot.cursor
+        );
+    }
+
+    #[test]
+    fn wide_scroll_snapshot_preserves_full_rows_without_missing_chars() {
+        let mut emulator = TerminalEmulator::with_size(48, 120);
+        let _ = emulator.process_and_report(
+            b"\x1b[H\x1b[2JFilesystem             Size   Used  Avail Capacity Mounted on\r\n",
+        );
+
+        for row in 0..220 {
+            let used_gib = (row * 7) % 900 + 50;
+            let avail_gib = 1024 - used_gib;
+            let capacity = (used_gib * 100) / 1024;
+            let line = format!(
+                "/dev/disk{row:<3}         1.0Ti  {used_gib:>4}Gi  {avail_gib:>4}Gi    {capacity:>2}%   /Volumes/worktree-{row:03}\r\n"
+            );
+            let _ = emulator.process_and_report(line.as_bytes());
+        }
+
+        let snapshot = emulator.snapshot();
+        let lines = snapshot
+            .styled_lines
+            .iter()
+            .map(|line| styled_line_to_string(Some(line)))
+            .collect::<Vec<_>>();
+        let expected_last_row =
+            "/dev/disk219         1.0Ti   683Gi   341Gi    66%   /Volumes/worktree-219";
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Filesystem             Size   Used  Avail Capacity Mounted on"),
+            "expected df-like header to survive snapshot: {lines:?}"
+        );
+        assert_eq!(
+            lines.iter().rev().find(|line| !line.is_empty()),
+            Some(&expected_last_row.to_owned()),
+            "expected final df-like row to survive snapshot without missing chars: {lines:?}"
+        );
+    }
+
+    #[test]
     fn osc_1337_bel_terminated_silently_consumed() {
         let mut emulator = TerminalEmulator::new();
         let seq =

@@ -9,6 +9,12 @@ pub(crate) fn terminal_input_unavailable_error(session: &TerminalSession) -> Ter
 }
 
 impl ArborWindow {
+    pub(crate) fn request_terminal_scroll_to_bottom(&mut self) {
+        self.terminal_scroll_handle.scroll_to_bottom();
+        self.terminal_follow_output_until =
+            Some(Instant::now() + TERMINAL_OUTPUT_FOLLOW_LOCK_DURATION);
+    }
+
     pub(crate) fn take_terminal_text_input_fallback(&mut self, text: &str) -> Option<Vec<u8>> {
         let pending = self.pending_terminal_text_input_fallback.take()?;
         terminal_keys::text_matches_terminal_input_fallback(text, &pending).then_some(pending)
@@ -86,7 +92,7 @@ impl ArborWindow {
             cx.defer(move |cx| {
                 let _ = this.update(cx, |this, cx| {
                     if this.active_terminal_id_for_selected_worktree() == Some(session_id) {
-                        this.terminal_scroll_handle.scroll_to_bottom();
+                        this.request_terminal_scroll_to_bottom();
                         cx.notify();
                     }
                 });

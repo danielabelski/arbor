@@ -13,6 +13,12 @@ impl ArborWindow {
         }
     }
 
+    pub(crate) fn initial_terminal_grid_size(&self) -> (u16, u16) {
+        self.last_terminal_grid_size
+            .filter(|(rows, cols)| *rows > 0 && *cols > 0)
+            .unwrap_or((35, 120))
+    }
+
     pub(crate) fn terminal_font_metrics(&mut self, cx: &App) -> TerminalFontMetrics {
         *self
             .terminal_font_metrics
@@ -354,7 +360,20 @@ impl ArborWindow {
         let mut changed = false;
         let mut repaint = false;
         let mut should_refresh_ports = false;
-        let follow_output = terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
+        let now = Instant::now();
+        let current_scroll_offset_y = self.terminal_scroll_handle.offset().y;
+        let is_near_bottom = terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
+        if terminal_follow_lock_is_active(self.terminal_follow_output_until, now)
+            && terminal_scroll_moved_away_from_bottom(
+                self.last_terminal_scroll_offset_y,
+                current_scroll_offset_y,
+                is_near_bottom,
+            )
+        {
+            self.terminal_follow_output_until = None;
+        }
+        let follow_output = is_near_bottom
+            || terminal_follow_lock_is_active(self.terminal_follow_output_until, now);
         let active_terminal_id = self.active_terminal_id_for_selected_worktree();
         let terminal_metrics = self.terminal_font_metrics(cx);
         let target_grid_size = terminal_grid_size_from_scroll_handle_with_metrics(
@@ -362,7 +381,6 @@ impl ArborWindow {
             terminal_metrics.cell_width,
             terminal_metrics.line_height,
         );
-        let now = Instant::now();
         if let Some((rows, cols, ..)) = target_grid_size {
             self.last_terminal_grid_size = Some((rows, cols));
         }
@@ -388,7 +406,9 @@ impl ArborWindow {
                 let session = &mut self.terminals[index];
                 runtime.sync(session, is_active, target_grid_size)
             };
-            self.terminals[index].last_runtime_sync_at = Some(now);
+            if outcome.record_sync_at {
+                self.terminals[index].last_runtime_sync_at = Some(now);
+            }
 
             changed |= outcome.changed;
             repaint |= outcome.repaint;
@@ -441,10 +461,11 @@ impl ArborWindow {
                 }
             }
             if should_auto_follow_terminal_output(changed || repaint, follow_output) {
-                self.terminal_scroll_handle.scroll_to_bottom();
+                self.request_terminal_scroll_to_bottom();
             }
             cx.notify();
         }
+        self.last_terminal_scroll_offset_y = Some(current_scroll_offset_y);
     }
 
     pub(crate) fn spawn_terminal_session_inner(
@@ -465,6 +486,7 @@ impl ArborWindow {
         self.next_terminal_id += 1;
         self.active_terminal_by_worktree
             .insert(cwd.clone(), session_id);
+        let (initial_rows, initial_cols) = self.initial_terminal_grid_size();
         let title = format!("term-{session_id}");
         self.terminals.push(TerminalSession {
             id: session_id,
@@ -481,8 +503,8 @@ impl ArborWindow {
             exit_code: None,
             updated_at_unix_ms: current_unix_timestamp_millis(),
             root_pid: None,
-            cols: 120,
-            rows: 35,
+            cols: initial_cols,
+            rows: initial_rows,
             generation: 0,
             output: String::new(),
             styled_output: Vec::new(),
@@ -498,7 +520,7 @@ impl ArborWindow {
 
         let daemon = self.terminal_daemon.clone();
         let shell = self.embedded_shell();
-        let target_grid_size = self.last_terminal_grid_size.unwrap_or((0, 0));
+        let target_grid_size = (initial_rows, initial_cols);
         let poll_tx = self.terminal_poll_tx.clone();
         cx.spawn(async move |this, cx| {
             enum SpawnTerminalOutcome {
@@ -531,8 +553,8 @@ impl ArborWindow {
                             workspace_id: cwd.display().to_string().into(),
                             cwd: cwd.clone(),
                             shell,
-                            cols: 120,
-                            rows: 35,
+                            cols: target_grid_size.1,
+                            rows: target_grid_size.0,
                             title: Some(title),
                             command: None,
                         }) {
@@ -737,7 +759,7 @@ impl ArborWindow {
         self.active_file_view_session_id = None;
         self.file_view_editing = false;
         self.logs_tab_active = false;
-        self.terminal_scroll_handle.scroll_to_bottom();
+        self.request_terminal_scroll_to_bottom();
         self.focus_terminal_on_next_render = true;
     }
 
@@ -762,7 +784,7 @@ impl ArborWindow {
             self.active_agent_chat_by_worktree
                 .remove(&worktree_path.to_path_buf());
         }
-        self.terminal_scroll_handle.scroll_to_bottom();
+        self.request_terminal_scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
         self.sync_ui_state_store(window, cx);
@@ -778,29 +800,32 @@ impl ArborWindow {
         let Some(outpost) = self.outposts.get(outpost_index) else {
             return;
         };
+        let outpost_host_name = outpost.host_name.clone();
+        let outpost_label = outpost.label.clone();
+        let worktree_path = outpost.repo_root.clone();
+        let remote_path = outpost.remote_path.clone();
+        let (initial_rows, initial_cols) = self.initial_terminal_grid_size();
 
         let host = self
             .remote_hosts
             .iter()
-            .find(|host| host.name == outpost.host_name)
+            .find(|host| host.name == outpost_host_name)
             .cloned();
         let Some(host) = host else {
             self.notice = Some(format!(
-                "no remote host config found for `{}`",
-                outpost.host_name,
+                "no remote host config found for `{outpost_host_name}`"
             ));
             cx.notify();
             return;
         };
 
-        let worktree_path = outpost.repo_root.clone();
         let session_id = self.next_terminal_id;
         self.next_terminal_id += 1;
         self.active_terminal_by_worktree
             .insert(worktree_path.clone(), session_id);
         self.active_agent_chat_by_worktree.remove(&worktree_path);
 
-        let title = format!("ssh-{}", outpost.label);
+        let title = format!("ssh-{outpost_label}");
         let session = TerminalSession {
             id: session_id,
             daemon_session_id: session_id.to_string(),
@@ -816,8 +841,8 @@ impl ArborWindow {
             exit_code: None,
             updated_at_unix_ms: current_unix_timestamp_millis(),
             root_pid: None,
-            cols: 120,
-            rows: 35,
+            cols: initial_cols,
+            rows: initial_rows,
             generation: 0,
             output: String::new(),
             styled_output: Vec::new(),
@@ -835,11 +860,10 @@ impl ArborWindow {
         self.active_file_view_session_id = None;
         self.file_view_editing = false;
         self.logs_tab_active = false;
-        self.terminal_scroll_handle.scroll_to_bottom();
+        self.request_terminal_scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
         let pool = self.ssh_connection_pool.clone();
-        let remote_path = outpost.remote_path.clone();
         let poll_tx = self.terminal_poll_tx.clone();
         cx.spawn(async move |this, cx| {
             enum OutpostLaunchOutcome {
@@ -994,7 +1018,7 @@ impl ArborWindow {
         }
         self.logs_tab_active = false;
         self.sync_navigation_ui_state_store(cx);
-        self.terminal_scroll_handle.scroll_to_bottom();
+        self.request_terminal_scroll_to_bottom();
         self.wake_terminal_poller();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;

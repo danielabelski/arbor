@@ -14,7 +14,7 @@ impl ArborWindow {
     ) {
         self.pending_local_worktree_selection = Some(worktree_path);
         self.refresh_worktrees(cx);
-        self.terminal_scroll_handle.scroll_to_bottom();
+        self.request_terminal_scroll_to_bottom();
         self.focus_terminal_on_next_render = true;
     }
 

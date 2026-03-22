@@ -657,7 +657,7 @@ impl ArborWindow {
                                 CenterTab::Terminal(session_id) => {
                                     if this.close_terminal_session_by_id(session_id) {
                                         this.sync_daemon_session_store(cx);
-                                        this.terminal_scroll_handle.scroll_to_bottom();
+                                        this.request_terminal_scroll_to_bottom();
                                         window.focus(&this.terminal_focus);
                                         this.focus_terminal_on_next_render = false;
                                         cx.notify();

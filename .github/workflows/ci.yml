@@ -113,6 +113,23 @@ jobs:
             libavahi-client-dev
       - run: just test
 
+  terminal-benchmark-smoke:
+    name: Terminal Benchmark Smoke
+    needs: [zizmor]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+      - name: Run terminal workload benchmark helper
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} test -p arbor-terminal-emulator --test workload_benchmark -- --ignored --nocapture
+
   ghostty-vt:
     name: Ghostty VT
     needs: [zizmor]
@@ -190,7 +207,7 @@ jobs:
   build-matrix:
     name: Build (${{ matrix.name }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [fmt, clippy, test, ghostty-vt, clippy-windows, test-windows]
+    needs: [fmt, clippy, test, terminal-benchmark-smoke, ghostty-vt, clippy-windows, test-windows]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read

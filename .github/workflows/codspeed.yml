@@ -34,7 +34,7 @@ jobs:
           online-audits: false
 
   codspeed:
-    name: Benchmarks
+    name: Core Benchmarks
     needs: zizmor
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
@@ -67,6 +67,33 @@ jobs:
         with:
           mode: simulation
           run: cargo codspeed run
+
+  terminal-codspeed:
+    name: Embedded Terminal Benchmarks
+    needs: zizmor
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install ${{ env.NIGHTLY_TOOLCHAIN }} --profile minimal
+          rustup default ${{ env.NIGHTLY_TOOLCHAIN }}
+      - uses: taiki-e/install-action@a7c938ee233ac44ef6f2fba5ac2d30fa12584c6e # cargo-codspeed
+        with:
+          tool: cargo-codspeed
+      - name: Build the benchmark target(s)
+        run: cargo codspeed build -p arbor-benchmarks --bench embedded_terminal -m simulation
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@281164b0f014a4e7badd2c02cecad9b595b70537 # v4.11.1
+        with:
+          mode: simulation
+          run: cargo codspeed run -p arbor-benchmarks --bench embedded_terminal
 
   ghostty-codspeed:
     name: Ghostty Benchmarks

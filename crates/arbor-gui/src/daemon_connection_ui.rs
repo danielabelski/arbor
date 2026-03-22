@@ -128,7 +128,7 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) {
         self.activate_remote_worktree(daemon_index, worktree_path, cx);
-        self.terminal_scroll_handle.scroll_to_bottom();
+        self.request_terminal_scroll_to_bottom();
         window.focus(&self.terminal_focus);
         cx.notify();
     }
@@ -180,6 +180,7 @@ impl ArborWindow {
                 .insert(cwd.clone(), session_id);
 
             let shell = self.embedded_shell();
+            let (initial_rows, initial_cols) = self.initial_terminal_grid_size();
 
             let session = TerminalSession {
                 id: session_id,
@@ -196,8 +197,8 @@ impl ArborWindow {
                 exit_code: None,
                 updated_at_unix_ms: current_unix_timestamp_millis(),
                 root_pid: None,
-                cols: 120,
-                rows: 35,
+                cols: initial_cols,
+                rows: initial_rows,
                 generation: 0,
                 output: String::new(),
                 styled_output: Vec::new(),
@@ -221,8 +222,8 @@ impl ArborWindow {
                                 workspace_id: cwd.display().to_string().into(),
                                 cwd: cwd.clone(),
                                 shell,
-                                cols: 120,
-                                rows: 35,
+                                cols: initial_cols,
+                                rows: initial_rows,
                                 title: Some(format!("term-{session_id}")),
                                 command: None,
                             })

@@ -1719,6 +1719,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn daemon_runtime_without_snapshot_does_not_rate_limit_followup_snapshot() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
+        session.output.clear();
+        session.styled_output.clear();
+        session.cursor = None;
+
+        let now = Instant::now();
+        let first = runtime.sync(&mut session, true, None);
+        assert!(
+            !first.record_sync_at,
+            "missing snapshots should not start the coalesce timer"
+        );
+        if first.record_sync_at {
+            session.last_runtime_sync_at = Some(now);
+        }
+
+        runtime.ws_state.apply_snapshot_text(
+            "restored output\r\n",
+            TerminalState::Running,
+            None,
+            Some(42),
+        );
+
+        assert!(
+            runtime.should_sync(&session, true, None, now),
+            "the first real snapshot after restore should sync immediately"
+        );
+    }
+
+    #[test]
     fn daemon_ws_state_rehydrates_trimmed_snapshot_from_ansi_output() {
         let ws_state = DaemonTerminalWsState::default();
         ws_state.apply_snapshot_text("hello\r\nworld\r\n", TerminalState::Running, None, Some(42));
@@ -1759,6 +1790,37 @@ pub(crate) mod tests {
             .snapshot()
             .unwrap_or_else(|| panic!("expected inline websocket snapshot for large redraw"));
         assert!(snapshot.terminal.output.contains(&"x".repeat(128)));
+    }
+
+    #[test]
+    fn interactive_ws_df_sized_output_publishes_snapshot_immediately() {
+        let ws_state = DaemonTerminalWsState::default();
+        ws_state.enter_interactive_output_window();
+
+        let df_like = (0..180)
+            .map(|index| {
+                format!(
+                    "/dev/disk{index:03}  2.0Ti  1.0Ti  1.0Ti  50%  /Volumes/worktree-{index:03}\r\n"
+                )
+            })
+            .collect::<String>();
+        assert!(
+            df_like.len() > 8_192,
+            "expected df-like redraw to exceed a single PTY read chunk, got {} bytes",
+            df_like.len()
+        );
+        assert!(
+            df_like.len() < INTERACTIVE_DAEMON_INLINE_SNAPSHOT_MAX_BYTES,
+            "df-like redraw should stay on the inline snapshot path"
+        );
+
+        assert!(ws_state.apply_output_bytes(df_like.as_bytes()));
+
+        let snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected inline websocket snapshot for df-like output"));
+        assert!(snapshot.terminal.output.contains("/Volumes/worktree-000"));
+        assert!(snapshot.terminal.output.contains("/Volumes/worktree-179"));
     }
 
     #[test]

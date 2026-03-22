@@ -92,14 +92,21 @@ pub(crate) const BUILT_IN_GITHUB_OAUTH_CLIENT_ID: Option<&str> = Some("Ov23liVex
 pub(crate) const GITHUB_AUTH_COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1200);
 pub(crate) const CONFIG_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 14;
-pub(crate) const ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(250);
+pub(crate) const ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(4);
 pub(crate) const INACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL: Duration =
     Duration::from_millis(1000);
-pub(crate) const ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL: Duration = Duration::from_millis(250);
+pub(crate) const TERMINAL_OUTPUT_FOLLOW_LOCK_DURATION: Duration = Duration::from_millis(48);
+// Zed processes the first wakeup immediately and batches follow-up terminal work in a
+// 4 ms window. Match that cadence for Arbor's active terminals so bursty commands like
+// `df` do not visibly stall between PTY chunks.
+pub(crate) const ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL: Duration = Duration::from_millis(4);
 pub(crate) const INTERACTIVE_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(33);
 pub(crate) const INTERACTIVE_TERMINAL_SYNC_WINDOW: Duration = Duration::from_secs(2);
 pub(crate) const INTERACTIVE_DAEMON_INLINE_SNAPSHOT_WINDOW: Duration = Duration::from_millis(500);
-pub(crate) const INTERACTIVE_DAEMON_INLINE_SNAPSHOT_MAX_BYTES: usize = 4_096;
+// The daemon PTY reader currently emits up to 8 KiB chunks. Keep the inline snapshot
+// budget above that so `df`-style bursts stay on the fast path instead of waiting for
+// a deferred snapshot rebuild.
+pub(crate) const INTERACTIVE_DAEMON_INLINE_SNAPSHOT_MAX_BYTES: usize = 16 * 1024;
 pub(crate) const ACTIVE_SSH_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(90);
 pub(crate) const INACTIVE_SSH_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(250);
 pub(crate) const ACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_secs(2);

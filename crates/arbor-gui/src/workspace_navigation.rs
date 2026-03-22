@@ -383,6 +383,7 @@ impl ArborWindow {
         let process_command_for_spawn = process.command.clone();
         let process_command_for_update = process.command.clone();
         let process_working_dir = process.working_dir.clone();
+        let (initial_rows, initial_cols) = self.initial_terminal_grid_size();
         self.terminals.push(TerminalSession {
             id: session_id,
             daemon_session_id: session_id.to_string(),
@@ -398,8 +399,8 @@ impl ArborWindow {
             exit_code: None,
             updated_at_unix_ms: current_unix_timestamp_millis(),
             root_pid: None,
-            cols: 120,
-            rows: 35,
+            cols: initial_cols,
+            rows: initial_rows,
             generation: 0,
             output: String::new(),
             styled_output: Vec::new(),
@@ -447,8 +448,8 @@ impl ArborWindow {
                             workspace_id: worktree_path.display().to_string().into(),
                             cwd: process_working_dir.clone(),
                             shell,
-                            cols: 120,
-                            rows: 35,
+                            cols: initial_cols,
+                            rows: initial_rows,
                             title: Some(title.clone()),
                             command: Some(process_command_for_spawn.clone()),
                         }) {
@@ -757,6 +758,19 @@ impl ArborWindow {
         if let Some(session_id) = self.active_terminal_id_for_worktree(&worktree_path) {
             self.active_terminal_by_worktree
                 .insert(worktree_path, session_id);
+            if let Some(session) = self
+                .terminals
+                .iter_mut()
+                .find(|session| session.id == session_id)
+            {
+                session.interactive_sync_until =
+                    Some(Instant::now() + INTERACTIVE_TERMINAL_SYNC_WINDOW);
+                if let Some(runtime) = session.runtime.as_ref() {
+                    runtime.session_became_active(session);
+                }
+            }
+            self.request_terminal_scroll_to_bottom();
+            self.wake_terminal_poller();
         }
 
         true
@@ -1030,7 +1044,7 @@ impl ArborWindow {
             Some(CenterTab::Terminal(session_id)) => {
                 if self.close_terminal_session_by_id(session_id) {
                     self.sync_daemon_session_store(cx);
-                    self.terminal_scroll_handle.scroll_to_bottom();
+                    self.request_terminal_scroll_to_bottom();
                     window.focus(&self.terminal_focus);
                     self.focus_terminal_on_next_render = false;
                     cx.notify();
@@ -1796,7 +1810,7 @@ impl ArborWindow {
             self.sync_daemon_session_store(cx);
         }
         self.sync_navigation_ui_state_store(cx);
-        self.terminal_scroll_handle.scroll_to_bottom();
+        self.request_terminal_scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
         cx.notify();

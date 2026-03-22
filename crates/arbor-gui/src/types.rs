@@ -392,14 +392,28 @@ pub(crate) struct TerminalRenderSnapshot {
     pub(crate) state: TerminalState,
 }
 
-#[derive(Default)]
 pub(crate) struct TerminalRuntimeSyncOutcome {
     pub(crate) changed: bool,
     pub(crate) repaint: bool,
+    pub(crate) record_sync_at: bool,
     pub(crate) close_session: bool,
     pub(crate) clear_global_daemon: bool,
     pub(crate) notice: Option<String>,
     pub(crate) notification: Option<RuntimeNotification>,
+}
+
+impl Default for TerminalRuntimeSyncOutcome {
+    fn default() -> Self {
+        Self {
+            changed: false,
+            repaint: false,
+            record_sync_at: true,
+            close_session: false,
+            clear_global_daemon: false,
+            notice: None,
+            notification: None,
+        }
+    }
 }
 
 pub(crate) trait EmulatorRuntimeBackend: Clone {
@@ -1265,6 +1279,7 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
                 self.snapshot_request_in_flight.clone(),
                 self.snapshot_request_pending.clone(),
             );
+            outcome.record_sync_at = false;
             return outcome;
         };
 
@@ -2555,6 +2570,8 @@ pub(crate) struct ArborWindow {
     pub(crate) issue_details_focus: FocusHandle,
     pub(crate) welcome_clone_focus: FocusHandle,
     pub(crate) terminal_scroll_handle: ScrollHandle,
+    pub(crate) terminal_follow_output_until: Option<Instant>,
+    pub(crate) last_terminal_scroll_offset_y: Option<Pixels>,
     pub(crate) issue_details_scroll_handle: ScrollHandle,
     pub(crate) issue_details_scrollbar_drag_offset: Option<Pixels>,
     pub(crate) last_terminal_grid_size: Option<(u16, u16)>,

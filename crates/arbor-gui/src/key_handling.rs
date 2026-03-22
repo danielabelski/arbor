@@ -728,7 +728,7 @@ impl ArborWindow {
                 self.sync_daemon_session_store(cx);
             }
             self.sync_navigation_ui_state_store(cx);
-            self.terminal_scroll_handle.scroll_to_bottom();
+            self.request_terminal_scroll_to_bottom();
             window.focus(&self.terminal_focus);
             self.focus_terminal_on_next_render = false;
             cx.notify();
@@ -753,7 +753,7 @@ impl ArborWindow {
                 self.sync_daemon_session_store(cx);
             }
             self.sync_navigation_ui_state_store(cx);
-            self.terminal_scroll_handle.scroll_to_bottom();
+            self.request_terminal_scroll_to_bottom();
             window.focus(&self.terminal_focus);
             self.focus_terminal_on_next_render = false;
             cx.notify();

@@ -242,8 +242,14 @@ fn collect_styled_lines_between(
         lines.push(finalize_styled_line(cells));
     }
 
-    while lines.last().is_some_and(|line| line.cells.is_empty()) {
-        lines.pop();
+    // Preserve blank rows at the bottom of the active screen. Cursor-relative
+    // redraw workloads rely on those rows to keep the live viewport anchored
+    // to the terminal's actual height instead of collapsing onto the last
+    // non-empty line.
+    if bottom_line != grid.bottommost_line().0 {
+        while lines.last().is_some_and(|line| line.cells.is_empty()) {
+            lines.pop();
+        }
     }
 
     if lines.is_empty() {

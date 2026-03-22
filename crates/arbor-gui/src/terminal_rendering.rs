@@ -702,6 +702,7 @@ pub(crate) fn render_terminal_lines(
                 },
                 move |bounds, shaped_lines, window, cx| {
                     let scale_factor = window.scale_factor();
+                    window.paint_quad(fill(bounds, rgb(theme.terminal_bg)));
                     for (line_index, line) in shaped_lines.iter().enumerate() {
                         let line_y = bounds.origin.y
                             + px((first_visible_line + line_index) as f32 * line_height_px);
@@ -820,8 +821,14 @@ pub(crate) fn terminal_display_tail_lines_for_source(
     }
 
     if !source.styled_output.is_empty() {
-        let start = source.styled_output.len().saturating_sub(max_lines);
-        return source.styled_output[start..]
+        let end = source
+            .styled_output
+            .iter()
+            .rposition(|line| !(line.cells.is_empty() && line.runs.is_empty()))
+            .map_or(1, |index| index + 1)
+            .min(source.styled_output.len());
+        let start = end.saturating_sub(max_lines);
+        return source.styled_output[start..end]
             .iter()
             .map(styled_line_to_string)
             .collect();
@@ -1002,7 +1009,23 @@ pub(crate) fn terminal_scroll_is_near_bottom(scroll_handle: &ScrollHandle) -> bo
 
     let offset = scroll_handle.offset();
     let distance_from_bottom = (offset.y + max_offset.height).abs();
-    distance_from_bottom <= px(6.)
+    distance_from_bottom <= px(TERMINAL_CELL_HEIGHT_PX)
+}
+
+pub(crate) fn terminal_follow_lock_is_active(
+    follow_output_until: Option<Instant>,
+    now: Instant,
+) -> bool {
+    follow_output_until.is_some_and(|until| until > now)
+}
+
+pub(crate) fn terminal_scroll_moved_away_from_bottom(
+    previous_offset_y: Option<Pixels>,
+    current_offset_y: Pixels,
+    is_near_bottom: bool,
+) -> bool {
+    !is_near_bottom
+        && previous_offset_y.is_some_and(|previous| current_offset_y > previous + px(1.))
 }
 
 pub(crate) fn terminal_grid_size_from_scroll_handle_with_metrics(
@@ -1090,9 +1113,9 @@ pub(crate) fn terminal_grid_size_for_viewport(
 
 pub(crate) fn should_auto_follow_terminal_output(
     terminal_updated: bool,
-    was_near_bottom: bool,
+    should_follow_output: bool,
 ) -> bool {
-    terminal_updated && was_near_bottom
+    terminal_updated && should_follow_output
 }
 
 #[cfg(test)]
@@ -1101,6 +1124,7 @@ mod tests {
     use {
         super::*,
         crate::{daemon_runtime::session_with_styled_line, theme::ThemeKind},
+        arbor_terminal_emulator::TerminalEmulator,
     };
 
     #[test]
@@ -1428,6 +1452,174 @@ mod tests {
     #[test]
     fn auto_follow_is_disabled_without_new_output() {
         assert!(!should_auto_follow_terminal_output(false, false));
+    }
+
+    #[test]
+    fn active_follow_lock_keeps_output_pinned_between_paints() {
+        let now = Instant::now();
+        let follow_lock_until = Some(now + TERMINAL_OUTPUT_FOLLOW_LOCK_DURATION);
+        assert!(terminal_follow_lock_is_active(follow_lock_until, now));
+        assert!(should_auto_follow_terminal_output(
+            true,
+            terminal_follow_lock_is_active(follow_lock_until, now),
+        ));
+    }
+
+    #[test]
+    fn expired_follow_lock_stops_auto_follow_when_not_at_bottom() {
+        let now = Instant::now();
+        let follow_lock_until = Some(now);
+        assert!(!terminal_follow_lock_is_active(follow_lock_until, now));
+        assert!(!should_auto_follow_terminal_output(
+            true,
+            terminal_follow_lock_is_active(follow_lock_until, now),
+        ));
+    }
+
+    #[test]
+    fn upward_scroll_during_follow_lock_cancels_follow_mode() {
+        assert!(terminal_scroll_moved_away_from_bottom(
+            Some(px(-120.)),
+            px(-80.),
+            false,
+        ));
+        assert!(!terminal_scroll_moved_away_from_bottom(
+            Some(px(-120.)),
+            px(-160.),
+            false,
+        ));
+        assert!(!terminal_scroll_moved_away_from_bottom(
+            Some(px(-120.)),
+            px(-80.),
+            true,
+        ));
+    }
+
+    #[test]
+    fn gui_display_lines_preserve_cursor_relative_prompt_redraws() {
+        let mut emulator = TerminalEmulator::with_size(12, 72);
+        let initial = concat!(
+            "  Would you like to make the following edits?\r\n",
+            "\r\n",
+            "  crates/arbor-gui/src/app_init.rs (+4 -0)\r\n",
+            "    223  -        self.terminal_scroll_handle: ScrollHandle::new(),\r\n",
+            "    224  +        terminal_follow_output_until: None,\r\n",
+            "    225  +        last_terminal_scroll_offset_y: None,\r\n",
+            "\r\n",
+            "  1. Yes, proceed (y)\r\n",
+            "› 2. Yes, and don't ask again for these files (a)\r\n",
+            "  3. No, and tell Codex what to do differently (esc)",
+        );
+        let redraw = concat!(
+            "\x1b[3A",
+            "\r\x1b[2K  1. Yes, proceed (y)",
+            "\x1b[1B",
+            "\r\x1b[2K› 2. Yes, and don't ask again for these files (a)",
+            "\x1b[1B",
+            "\r\x1b[2K  3. No, and tell Codex what to do differently (esc)",
+        );
+        emulator.process(initial.as_bytes());
+        emulator.process(redraw.as_bytes());
+
+        let snapshot = emulator.snapshot();
+        let source = terminal_render_source_for_snapshot(1, TerminalState::Running, &snapshot);
+        let rendered = terminal_display_lines_for_source(&source).join("\n");
+
+        assert!(
+            rendered.contains("Would you like to make the following edits?"),
+            "expected prompt header to survive GUI line conversion: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("terminal_follow_output_until: None"),
+            "expected diff content to remain readable in GUI line conversion: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("› 2. Yes, and don't ask again for these files (a)"),
+            "expected selected option to survive GUI line conversion: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("1. Yes, and don't ask again"),
+            "unexpected line bleed in GUI line conversion: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_display_tail_lines_skip_blank_screen_padding() {
+        let source = TerminalRenderSource {
+            session_id: 1,
+            state: TerminalState::Running,
+            output: "",
+            styled_output: &[
+                TerminalStyledLine {
+                    cells: Vec::new(),
+                    runs: vec![TerminalStyledRun {
+                        text: "header".to_owned(),
+                        fg: 0xffffff,
+                        bg: 0x000000,
+                    }],
+                },
+                TerminalStyledLine {
+                    cells: Vec::new(),
+                    runs: vec![TerminalStyledRun {
+                        text: "menu".to_owned(),
+                        fg: 0xffffff,
+                        bg: 0x000000,
+                    }],
+                },
+                TerminalStyledLine {
+                    cells: Vec::new(),
+                    runs: Vec::new(),
+                },
+                TerminalStyledLine {
+                    cells: Vec::new(),
+                    runs: Vec::new(),
+                },
+            ],
+            cursor: Some(TerminalCursor { line: 1, column: 0 }),
+        };
+
+        assert_eq!(terminal_display_tail_lines_for_source(&source, 2), vec![
+            "header".to_owned(),
+            "menu".to_owned()
+        ]);
+    }
+
+    #[test]
+    fn gui_display_lines_preserve_wide_scroll_rows_without_missing_chars() {
+        let mut emulator = TerminalEmulator::with_size(48, 120);
+        emulator.process(
+            b"\x1b[H\x1b[2JFilesystem             Size   Used  Avail Capacity Mounted on\r\n",
+        );
+
+        for row in 0..220 {
+            let used_gib = (row * 7) % 900 + 50;
+            let avail_gib = 1024 - used_gib;
+            let capacity = (used_gib * 100) / 1024;
+            emulator.process(
+                format!(
+                    "/dev/disk{row:<3}         1.0Ti  {used_gib:>4}Gi  {avail_gib:>4}Gi    {capacity:>2}%   /Volumes/worktree-{row:03}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+
+        let snapshot = emulator.snapshot();
+        let source = terminal_render_source_for_snapshot(1, TerminalState::Running, &snapshot);
+        let lines = terminal_display_lines_for_source(&source);
+        let expected_last_row =
+            "/dev/disk219         1.0Ti   683Gi   341Gi    66%   /Volumes/worktree-219";
+
+        assert!(
+            lines.iter().any(|line| {
+                line == "Filesystem             Size   Used  Avail Capacity Mounted on"
+            }),
+            "expected df-like header to survive GUI line conversion: {lines:?}"
+        );
+        assert_eq!(
+            lines.iter().rev().find(|line| !line.is_empty()),
+            Some(&expected_last_row.to_owned()),
+            "expected final df-like row to survive GUI line conversion without missing chars: {lines:?}"
+        );
     }
 
     #[test]

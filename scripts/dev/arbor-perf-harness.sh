@@ -12,7 +12,7 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/dev/arbor-perf-harness.sh build
-  scripts/dev/arbor-perf-harness.sh start [dashboard|hidden|redraw|scroll]
+  scripts/dev/arbor-perf-harness.sh start [dashboard|df|hidden|prompt|redraw|scroll]
   scripts/dev/arbor-perf-harness.sh daemon
   scripts/dev/arbor-perf-harness.sh seed
   scripts/dev/arbor-perf-harness.sh gui
@@ -22,7 +22,9 @@ Usage:
 
 Modes:
   dashboard  Runs the upstream ratatui demo dashboard as a realistic TUI workload.
+  df         Replays a wide, many-row df-like table to expose bursty output delivery.
   hidden  Rewrites a single visible line with carriage returns to mimic "thinking".
+  prompt  Replays a Codex-style approval prompt with cursor-relative redraws.
   redraw  Repaints a full alternate-screen terminal frame to mimic resume/session-list redraws.
   scroll  Continuously prints visible lines to stress scrolling throughput.
 EOF
@@ -98,6 +100,29 @@ write_workload_script() {
   local script_path="$2"
 
   case "$mode" in
+    df)
+      cat >"$script_path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+iteration=0
+while true; do
+  iteration=$((iteration + 1))
+  printf '\033[H\033[2J'
+  printf 'Filesystem             Size   Used  Avail Capacity Mounted on\n'
+  row=0
+  while [[ "$row" -lt 220 ]]; do
+    used_gib=$(((iteration * 7 + row * 3) % 900 + 50))
+    avail_gib=$((1024 - used_gib))
+    capacity=$(((used_gib * 100) / 1024))
+    printf '/dev/disk%-3d         1.0Ti  %4dGi  %4dGi    %2d%%   /Volumes/worktree-%03d\n' \
+      "$row" "$used_gib" "$avail_gib" "$capacity" "$row"
+    row=$((row + 1))
+  done
+  sleep 0.35
+done
+EOF
+      ;;
     hidden)
       cat >"$script_path" <<'EOF'
 #!/usr/bin/env bash
@@ -107,6 +132,49 @@ while true; do
   printf '\rthinking %08d ' "$i"
   i=$((i + 1))
   sleep 0.02
+done
+EOF
+      ;;
+    prompt)
+      cat >"$script_path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+frame=0
+while true; do
+  frame=$((frame + 1))
+  printf '\033[H\033[2J'
+  printf '  Would you like to make the following edits?\n'
+  printf '\n'
+  printf '  crates/arbor-gui/src/app_init.rs (+4 -0)\n'
+  printf '    223  -        self.terminal_scroll_handle: ScrollHandle::new(),\n'
+  printf '    224  +        terminal_follow_output_until: None,\n'
+  printf '    225  +        last_terminal_scroll_offset_y: None,\n'
+  printf '\n'
+  printf '  1. Yes, proceed (y)\n'
+  printf '  2. Yes, and don'\''t ask again for these files (a)\n'
+  printf '  3. No, and tell Codex what to do differently (esc)\n'
+  sleep 0.10
+  selection=$((frame % 3))
+  printf '\033[3A'
+  case "$selection" in
+    0)
+      printf '\r\033[2K› 1. Yes, proceed (y)\n'
+      printf '\r\033[2K  2. Yes, and don'\''t ask again for these files (a)\n'
+      printf '\r\033[2K  3. No, and tell Codex what to do differently (esc)\n'
+      ;;
+    1)
+      printf '\r\033[2K  1. Yes, proceed (y)\n'
+      printf '\r\033[2K› 2. Yes, and don'\''t ask again for these files (a)\n'
+      printf '\r\033[2K  3. No, and tell Codex what to do differently (esc)\n'
+      ;;
+    *)
+      printf '\r\033[2K  1. Yes, proceed (y)\n'
+      printf '\r\033[2K  2. Yes, and don'\''t ask again for these files (a)\n'
+      printf '\r\033[2K› 3. No, and tell Codex what to do differently (esc)\n'
+      ;;
+  esac
+  sleep 0.25
 done
 EOF
       ;;
