@@ -88,6 +88,20 @@ All dependency versions live in the root `Cargo.toml` `[workspace.dependencies]`
 - Do not amend commits unless explicitly asked.
 - Only create commits when the user asks.
 
+## Commit Messages
+
+- Prefer conventional commits when they fit: `feat|fix|docs|refactor|test|chore(scope): summary`.
+- Use a real commit body for any non-trivial change. One-line commits are for genuinely tiny edits only.
+- Structure commit messages like this:
+  1. Subject line: concise, imperative, and specific about the user-visible or architectural change.
+  2. Blank line.
+  3. Body: short paragraphs or bullets explaining why the change was needed, what changed, and any important constraints, follow-ups, or migrations.
+- The body should capture the reasoning that will matter in `git log` six months later, not just restate the diff.
+- Call out behavior changes, fallback paths, performance work, or bug triggers explicitly when they motivated the change.
+- If validation was important, mention the key checks in the body instead of making reviewers guess.
+- Avoid useless subjects like `fix stuff`, `updates`, `wip`, or `misc cleanup`.
+- Do not add `Co-Authored-By` or AI attribution trailers unless the user explicitly asks for them.
+
 ## PR Review Comments
 
 When working in a worktree linked to a pull request, check `.arbor/pr-comments.md` for
