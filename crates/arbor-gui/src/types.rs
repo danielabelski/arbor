@@ -1,7 +1,7 @@
 use {
     super::*,
     serde::{Deserialize, Serialize},
-    std::sync::atomic::AtomicU64,
+    std::sync::{OnceLock, atomic::AtomicU64},
 };
 
 /// Identifies a sidebar item for persisted UI ordering.
@@ -543,8 +543,10 @@ pub(crate) struct DaemonTerminalWsState {
     pub(crate) snapshot_build_in_flight: AtomicBool,
     pub(crate) snapshot_build_pending: AtomicBool,
     pub(crate) interactive_output_until_unix_ms: AtomicU64,
+    pub(crate) interactive_output_started_at_unix_ms: AtomicU64,
     pub(crate) closed: AtomicBool,
     pub(crate) connection_refused: AtomicBool,
+    pub(crate) debug_session_id: Mutex<Option<String>>,
     /// Channel to send keystroke bytes to the WS thread for low-latency binary transmission.
     pub(crate) ws_writer: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
     /// Channel to wake the terminal poller when new data arrives.
@@ -580,8 +582,10 @@ impl DaemonTerminalWsState {
             snapshot_build_in_flight: AtomicBool::new(false),
             snapshot_build_pending: AtomicBool::new(false),
             interactive_output_until_unix_ms: AtomicU64::new(0),
+            interactive_output_started_at_unix_ms: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             connection_refused: AtomicBool::new(false),
+            debug_session_id: Mutex::new(None),
             ws_writer: Mutex::new(None),
             poll_notify,
             size: Mutex::new((rows, cols)),
@@ -634,8 +638,31 @@ impl DaemonTerminalWsState {
         };
         let until =
             now.saturating_add(INTERACTIVE_DAEMON_INLINE_SNAPSHOT_WINDOW.as_millis() as u64);
+        self.interactive_output_started_at_unix_ms
+            .store(now, Ordering::Relaxed);
         self.interactive_output_until_unix_ms
             .store(until, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_debug_session_id(&self, session_id: impl Into<String>) {
+        if let Ok(mut guard) = self.debug_session_id.lock() {
+            *guard = Some(session_id.into());
+        }
+    }
+
+    pub(crate) fn debug_session_id(&self) -> Option<String> {
+        self.debug_session_id
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    pub(crate) fn interactive_output_elapsed_ms(&self) -> Option<u64> {
+        let started_at = self
+            .interactive_output_started_at_unix_ms
+            .load(Ordering::Relaxed);
+        let now = current_unix_timestamp_millis()?;
+        (started_at > 0 && now >= started_at).then_some(now - started_at)
     }
 
     pub(crate) fn should_inline_output_snapshot(&self, byte_len: usize) -> bool {
@@ -646,9 +673,22 @@ impl DaemonTerminalWsState {
         let Some(now) = current_unix_timestamp_millis() else {
             return false;
         };
+        let current_until = self
+            .interactive_output_until_unix_ms
+            .load(Ordering::Relaxed);
+        if current_until <= now {
+            return false;
+        }
+
+        // Keep the daemon fast path alive while output continues to arrive for
+        // an interaction the user just initiated. Slash commands like
+        // `/resume` stream redraws for multiple seconds, and a fixed deadline
+        // causes Arbor to fall back to deferred rebuilds mid-flow.
+        let extended_until =
+            now.saturating_add(INTERACTIVE_DAEMON_INLINE_SNAPSHOT_WINDOW.as_millis() as u64);
         self.interactive_output_until_unix_ms
-            .load(Ordering::Relaxed)
-            > now
+            .store(extended_until, Ordering::Relaxed);
+        true
     }
 
     pub(crate) fn snapshot_refresh_requested(&self) -> bool {
@@ -723,6 +763,30 @@ impl DaemonTerminalWsState {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
+        if matches!(
+            (updated_at_unix_ms, cached.updated_at_unix_ms),
+            (Some(snapshot_updated_at), Some(cached_updated_at))
+                if snapshot_updated_at < cached_updated_at
+        ) {
+            log_terminal_snapshot_debug(
+                self,
+                "stale full snapshot ignored",
+                Some(ansi_output.len()),
+                Some(&terminal_snapshot),
+                Some(updated_at_unix_ms),
+            );
+            return;
+        }
+        if should_defer_blank_alt_screen_snapshot(&cached, &terminal_snapshot) {
+            log_terminal_snapshot_debug(
+                self,
+                "blank full snapshot deferred",
+                Some(ansi_output.len()),
+                Some(&terminal_snapshot),
+                Some(updated_at_unix_ms),
+            );
+            return;
+        }
         *cached = DaemonTerminalCachedSnapshot {
             terminal: Arc::new(terminal_snapshot),
             state,
@@ -730,6 +794,17 @@ impl DaemonTerminalWsState {
             ready: true,
         };
         drop(cached);
+        log_terminal_snapshot_debug(
+            self,
+            "full snapshot applied",
+            Some(ansi_output.len()),
+            self.snapshot
+                .lock()
+                .ok()
+                .as_deref()
+                .map(|cached| cached.terminal.as_ref()),
+            Some(updated_at_unix_ms),
+        );
         self.note_event_with_cached_snapshot();
     }
 
@@ -751,6 +826,13 @@ impl DaemonTerminalWsState {
         };
 
         let Some(mut terminal_snapshot) = inline_snapshot else {
+            log_terminal_snapshot_debug(
+                self,
+                "binary output scheduled for rebuild",
+                Some(bytes.len()),
+                None,
+                None,
+            );
             return false;
         };
 
@@ -762,6 +844,19 @@ impl DaemonTerminalWsState {
             .unwrap_or(None);
         terminal_snapshot.exit_code = exit_code;
 
+        if self.snapshot.lock().ok().is_some_and(|cached| {
+            should_defer_blank_alt_screen_snapshot(&cached, &terminal_snapshot)
+        }) {
+            log_terminal_snapshot_debug(
+                self,
+                "blank inline snapshot deferred",
+                Some(bytes.len()),
+                Some(&terminal_snapshot),
+                None,
+            );
+            return true;
+        }
+
         let mut cached = match self.snapshot.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -770,6 +865,17 @@ impl DaemonTerminalWsState {
         cached.updated_at_unix_ms = current_unix_timestamp_millis();
         cached.ready = true;
         drop(cached);
+        log_terminal_snapshot_debug(
+            self,
+            "inline snapshot applied",
+            Some(bytes.len()),
+            self.snapshot
+                .lock()
+                .ok()
+                .as_deref()
+                .map(|cached| cached.terminal.as_ref()),
+            None,
+        );
         self.note_event_with_cached_snapshot();
         true
     }
@@ -837,6 +943,71 @@ impl DaemonTerminalWsState {
             .ok()
             .is_some_and(|snapshot| snapshot.ready)
     }
+}
+
+pub(crate) fn should_defer_blank_alt_screen_snapshot(
+    cached: &DaemonTerminalCachedSnapshot,
+    snapshot: &arbor_terminal_emulator::TerminalSnapshot,
+) -> bool {
+    snapshot.modes.alt_screen
+        && !terminal_snapshot_has_visible_content(snapshot)
+        && terminal_snapshot_has_visible_content(cached.terminal.as_ref())
+}
+
+pub(crate) fn terminal_snapshot_has_visible_content(
+    snapshot: &arbor_terminal_emulator::TerminalSnapshot,
+) -> bool {
+    snapshot
+        .styled_lines
+        .iter()
+        .any(|line| !(line.cells.is_empty() && line.runs.is_empty()))
+}
+
+pub(crate) fn terminal_snapshot_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            env::var("ARBOR_TERMINAL_DEBUG")
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            Some("1" | "true" | "TRUE" | "yes" | "YES")
+        )
+    })
+}
+
+fn log_terminal_snapshot_debug(
+    ws_state: &DaemonTerminalWsState,
+    event: &str,
+    byte_len: Option<usize>,
+    snapshot: Option<&arbor_terminal_emulator::TerminalSnapshot>,
+    updated_at_unix_ms: Option<Option<u64>>,
+) {
+    if !terminal_snapshot_debug_enabled() {
+        return;
+    }
+
+    let session_id = ws_state
+        .debug_session_id()
+        .unwrap_or_else(|| "<unknown>".to_owned());
+    let elapsed_since_input_ms = ws_state.interactive_output_elapsed_ms();
+    let visible_content = snapshot.map(terminal_snapshot_has_visible_content);
+    let alt_screen = snapshot.map(|snapshot| snapshot.modes.alt_screen);
+    let line_count = snapshot.map(|snapshot| snapshot.styled_lines.len());
+    let output_chars = snapshot.map(|snapshot| snapshot.output.chars().count());
+
+    tracing::info!(
+        session_id = %session_id,
+        event,
+        byte_len,
+        elapsed_since_input_ms,
+        visible_content,
+        alt_screen,
+        line_count,
+        output_chars,
+        snapshot_updated_at_unix_ms = ?updated_at_unix_ms.flatten(),
+        "terminal snapshot trace"
+    );
 }
 
 impl EmulatorRuntimeBackend for EmbeddedTerminal {
@@ -2591,6 +2762,7 @@ pub(crate) struct ArborWindow {
     pub(crate) terminal_scroll_handle: ScrollHandle,
     pub(crate) terminal_follow_output_until: Option<Instant>,
     pub(crate) last_terminal_scroll_offset_y: Option<Pixels>,
+    pub(crate) last_terminal_scroll_max_offset_y: Option<Pixels>,
     pub(crate) issue_details_scroll_handle: ScrollHandle,
     pub(crate) issue_details_scrollbar_drag_offset: Option<Pixels>,
     pub(crate) last_terminal_grid_size: Option<(u16, u16)>,

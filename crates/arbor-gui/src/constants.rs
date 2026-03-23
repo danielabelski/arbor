@@ -102,7 +102,10 @@ pub(crate) const TERMINAL_OUTPUT_FOLLOW_LOCK_DURATION: Duration = Duration::from
 pub(crate) const ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL: Duration = Duration::from_millis(4);
 pub(crate) const INTERACTIVE_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(33);
 pub(crate) const INTERACTIVE_TERMINAL_SYNC_WINDOW: Duration = Duration::from_secs(2);
-pub(crate) const INTERACTIVE_DAEMON_INLINE_SNAPSHOT_WINDOW: Duration = Duration::from_millis(500);
+// Slash commands like `/resume` can take a beat before Codex redraws the
+// screen. Keep daemon output on the inline snapshot path long enough for that
+// first full frame to arrive instead of falling back to a deferred rebuild.
+pub(crate) const INTERACTIVE_DAEMON_INLINE_SNAPSHOT_WINDOW: Duration = Duration::from_secs(2);
 // The daemon PTY reader currently emits up to 8 KiB chunks. Keep the inline snapshot
 // budget above that so `df`-style bursts stay on the fast path instead of waiting for
 // a deferred snapshot rebuild.

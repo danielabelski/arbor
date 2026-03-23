@@ -361,20 +361,58 @@ impl ArborWindow {
         let mut repaint = false;
         let mut should_refresh_ports = false;
         let now = Instant::now();
-        let current_scroll_offset_y = self.terminal_scroll_handle.offset().y;
-        let is_near_bottom = terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
-        if terminal_follow_lock_is_active(self.terminal_follow_output_until, now)
-            && terminal_scroll_moved_away_from_bottom(
-                self.last_terminal_scroll_offset_y,
-                current_scroll_offset_y,
-                is_near_bottom,
-            )
-        {
-            self.terminal_follow_output_until = None;
-        }
-        let follow_output = is_near_bottom
-            || terminal_follow_lock_is_active(self.terminal_follow_output_until, now);
         let active_terminal_id = self.active_terminal_id_for_selected_worktree();
+        let current_scroll_offset_y = self.terminal_scroll_handle.offset().y;
+        let current_scroll_max_offset_y = self.terminal_scroll_handle.max_offset().height;
+        let is_near_bottom = terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
+        let follow_lock_active =
+            terminal_follow_lock_is_active(self.terminal_follow_output_until, now);
+        let interactive_follow_active = self
+            .terminals
+            .iter()
+            .find(|session| Some(session.id) == active_terminal_id)
+            .and_then(|session| session.interactive_sync_until)
+            .is_some_and(|deadline| terminal_interactive_follow_is_active(Some(deadline), now));
+        let moved_away_from_bottom = terminal_scroll_moved_away_from_bottom(
+            self.last_terminal_scroll_offset_y,
+            current_scroll_offset_y,
+            is_near_bottom,
+        );
+        if follow_lock_active && moved_away_from_bottom {
+            self.terminal_follow_output_until = None;
+            if terminal_snapshot_debug_enabled() {
+                tracing::info!(
+                    active_terminal_id = self.active_terminal_id_for_selected_worktree(),
+                    previous_scroll_offset_y = self
+                        .last_terminal_scroll_offset_y
+                        .map(|offset| offset.to_f64()),
+                    current_scroll_offset_y = current_scroll_offset_y.to_f64(),
+                    scroll_max_offset_y = self.terminal_scroll_handle.max_offset().height.to_f64(),
+                    is_near_bottom,
+                    "terminal follow trace: cancelled follow lock after upward scroll"
+                );
+            }
+        }
+        let follow_output = is_near_bottom || follow_lock_active || interactive_follow_active;
+        if terminal_snapshot_debug_enabled() {
+            tracing::info!(
+                active_terminal_id = self.active_terminal_id_for_selected_worktree(),
+                previous_scroll_offset_y = self
+                    .last_terminal_scroll_offset_y
+                    .map(|offset| offset.to_f64()),
+                current_scroll_offset_y = current_scroll_offset_y.to_f64(),
+                previous_scroll_max_offset_y = self
+                    .last_terminal_scroll_max_offset_y
+                    .map(|offset| offset.to_f64()),
+                scroll_max_offset_y = current_scroll_max_offset_y.to_f64(),
+                is_near_bottom,
+                follow_lock_active,
+                interactive_follow_active,
+                moved_away_from_bottom,
+                follow_output,
+                "terminal follow trace: pre-sync state"
+            );
+        }
         let terminal_metrics = self.terminal_font_metrics(cx);
         let target_grid_size = terminal_grid_size_from_scroll_handle_with_metrics(
             &self.terminal_scroll_handle,
@@ -454,18 +492,58 @@ impl ArborWindow {
         }
 
         if changed || repaint {
+            if terminal_snapshot_debug_enabled() {
+                tracing::info!(
+                    active_terminal_id,
+                    changed,
+                    repaint,
+                    follow_output,
+                    scroll_offset_y = self.terminal_scroll_handle.offset().y.to_f64(),
+                    scroll_max_offset_y = self.terminal_scroll_handle.max_offset().height.to_f64(),
+                    "terminal follow trace: sync requested repaint"
+                );
+            }
             if changed {
                 self.schedule_running_daemon_session_store_sync(cx);
                 if should_refresh_ports {
                     self.refresh_worktree_ports(cx);
                 }
             }
-            if should_auto_follow_terminal_output(changed || repaint, follow_output) {
+            let needs_bottom_scroll = !terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
+            let scroll_extent_changed = terminal_scroll_extent_changed(
+                self.last_terminal_scroll_max_offset_y,
+                self.terminal_scroll_handle.max_offset().height,
+            );
+            if should_auto_follow_terminal_output(changed || repaint, follow_output)
+                && (needs_bottom_scroll || scroll_extent_changed)
+            {
+                if terminal_snapshot_debug_enabled() {
+                    tracing::info!(
+                        active_terminal_id,
+                        changed,
+                        repaint,
+                        follow_output,
+                        needs_bottom_scroll,
+                        scroll_extent_changed,
+                        "terminal follow trace: auto-following output"
+                    );
+                }
                 self.request_terminal_scroll_to_bottom();
+            } else if terminal_snapshot_debug_enabled() {
+                tracing::info!(
+                    active_terminal_id,
+                    changed,
+                    repaint,
+                    follow_output,
+                    needs_bottom_scroll,
+                    scroll_extent_changed,
+                    "terminal follow trace: skipped auto-follow"
+                );
             }
             cx.notify();
         }
         self.last_terminal_scroll_offset_y = Some(current_scroll_offset_y);
+        self.last_terminal_scroll_max_offset_y = Some(current_scroll_max_offset_y);
     }
 
     pub(crate) fn spawn_terminal_session_inner(

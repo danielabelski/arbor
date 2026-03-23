@@ -50,9 +50,37 @@ impl ArborWindow {
     }
 
     pub(crate) fn request_terminal_scroll_to_bottom(&mut self) {
+        let already_at_bottom = terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
+        if terminal_snapshot_debug_enabled() {
+            tracing::info!(
+                active_terminal_id = self.active_terminal_id_for_selected_worktree(),
+                already_at_bottom,
+                previous_offset_y = self.terminal_scroll_handle.offset().y.to_f64(),
+                max_offset_y = self.terminal_scroll_handle.max_offset().height.to_f64(),
+                previous_follow_lock_active = terminal_follow_lock_is_active(
+                    self.terminal_follow_output_until,
+                    Instant::now()
+                ),
+                "terminal scroll request trace"
+            );
+        }
         self.terminal_scroll_handle.scroll_to_bottom();
         self.terminal_follow_output_until =
             Some(Instant::now() + TERMINAL_OUTPUT_FOLLOW_LOCK_DURATION);
+        if terminal_snapshot_debug_enabled() {
+            tracing::info!(
+                active_terminal_id = self.active_terminal_id_for_selected_worktree(),
+                already_at_bottom,
+                scroll_performed = true,
+                new_offset_y = self.terminal_scroll_handle.offset().y.to_f64(),
+                max_offset_y = self.terminal_scroll_handle.max_offset().height.to_f64(),
+                follow_lock_until_millis = self
+                    .terminal_follow_output_until
+                    .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+                    .map(|duration| duration.as_millis() as u64),
+                "terminal scroll request applied trace"
+            );
+        }
     }
 
     fn send_terminal_action_input(
@@ -126,6 +154,15 @@ impl ArborWindow {
     pub(crate) fn notify_after_terminal_input(&mut self, session_id: u64, cx: &mut Context<Self>) {
         let follow_bottom = self.active_terminal_id_for_selected_worktree() == Some(session_id)
             && terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
+        if terminal_snapshot_debug_enabled() {
+            tracing::info!(
+                session_id,
+                follow_bottom,
+                offset_y = self.terminal_scroll_handle.offset().y.to_f64(),
+                max_offset_y = self.terminal_scroll_handle.max_offset().height.to_f64(),
+                "terminal input follow trace"
+            );
+        }
         if follow_bottom {
             let this = cx.entity().downgrade();
             cx.defer(move |cx| {

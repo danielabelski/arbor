@@ -158,6 +158,7 @@ fn main() {
     }
 
     let log_buffer = log_layer::LogBuffer::new();
+    let terminal_debug_log_path = configure_terminal_debug_log_file(&log_buffer);
 
     {
         use tracing_subscriber::{
@@ -173,6 +174,34 @@ fn main() {
     }
 
     tracing::info!("Arbor starting");
+    if let Some(path) = terminal_debug_log_path {
+        tracing::info!(path = %path.display(), "terminal debug logs enabled");
+    }
 
     run_gui(log_buffer);
+}
+
+fn configure_terminal_debug_log_file(log_buffer: &log_layer::LogBuffer) -> Option<PathBuf> {
+    if !terminal_snapshot_debug_enabled() {
+        return None;
+    }
+
+    let home = user_home_dir().ok()?;
+    let log_dir = home.join(".arbor");
+    if fs::create_dir_all(&log_dir).is_err() {
+        return None;
+    }
+
+    let path = log_dir.join("gui-terminal-debug.log");
+    if fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .is_err()
+    {
+        return None;
+    }
+
+    log_buffer.set_persistent_log_path(path.clone());
+    Some(path)
 }

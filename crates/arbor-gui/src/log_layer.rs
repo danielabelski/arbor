@@ -2,8 +2,11 @@ use {
     std::{
         collections::VecDeque,
         fmt,
+        fs::OpenOptions,
+        io::Write,
+        path::{Path, PathBuf},
         sync::{Arc, Mutex},
-        time::SystemTime,
+        time::{SystemTime, UNIX_EPOCH},
     },
     tracing::{Event, Subscriber, field::Visit},
     tracing_subscriber::{Layer, layer::Context, registry::LookupSpan},
@@ -23,6 +26,7 @@ pub struct LogEntry {
 struct Inner {
     entries: VecDeque<LogEntry>,
     generation: u64,
+    persistent_log_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -36,6 +40,7 @@ impl LogBuffer {
             inner: Arc::new(Mutex::new(Inner {
                 entries: VecDeque::with_capacity(MAX_LOG_ENTRIES),
                 generation: 0,
+                persistent_log_path: None,
             })),
         }
     }
@@ -52,12 +57,25 @@ impl LogBuffer {
     }
 
     pub fn push(&self, entry: LogEntry) {
-        if let Ok(mut inner) = self.inner.lock() {
+        let persistent_log_path = if let Ok(mut inner) = self.inner.lock() {
             if inner.entries.len() >= MAX_LOG_ENTRIES {
                 inner.entries.pop_front();
             }
-            inner.entries.push_back(entry);
+            inner.entries.push_back(entry.clone());
             inner.generation += 1;
+            inner.persistent_log_path.clone()
+        } else {
+            None
+        };
+
+        if let Some(path) = persistent_log_path {
+            append_persistent_log_entry(&path, &entry);
+        }
+    }
+
+    pub fn set_persistent_log_path(&self, path: PathBuf) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.persistent_log_path = Some(path);
         }
     }
 }
@@ -117,4 +135,44 @@ impl Visit for FieldVisitor {
                 .push((field.name().to_owned(), value.to_owned()));
         }
     }
+}
+
+fn append_persistent_log_entry(path: &Path, entry: &LogEntry) {
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+
+    let timestamp_ms = entry
+        .timestamp
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+
+    let fields = if entry.fields.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            entry
+                .fields
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+
+    let line = format!("{timestamp_ms} {} {}", entry.level, entry.target);
+    let line = if entry.message.is_empty() {
+        line
+    } else {
+        format!("{line} {}", entry.message)
+    };
+    let line = if fields.is_empty() {
+        line
+    } else {
+        format!("{line} {fields}")
+    };
+
+    let _ = writeln!(file, "{line}");
 }

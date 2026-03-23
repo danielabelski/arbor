@@ -21,6 +21,7 @@ pub(crate) fn local_daemon_runtime(
     poll_notify: Option<std::sync::mpsc::Sender<()>>,
 ) -> SharedTerminalRuntime {
     let ws_state = Arc::new(DaemonTerminalWsState::new(poll_notify, rows, cols));
+    ws_state.set_debug_session_id(session_id.clone());
     let snapshot_request_in_flight = Arc::new(AtomicBool::new(false));
     let snapshot_request_pending = Arc::new(AtomicBool::new(false));
     spawn_daemon_terminal_ws_watcher(
@@ -617,6 +618,14 @@ pub(crate) fn apply_daemon_ws_snapshot_rebuild(
     terminal_snapshot: arbor_terminal_emulator::TerminalSnapshot,
 ) -> bool {
     if ws_state.emulator_generation() != requested_generation {
+        if terminal_snapshot_debug_enabled() {
+            tracing::info!(
+                session_id = %ws_state.debug_session_id().unwrap_or_else(|| "<unknown>".to_owned()),
+                requested_generation,
+                current_generation = ws_state.emulator_generation(),
+                "terminal snapshot rebuild dropped due to stale emulator generation"
+            );
+        }
         return false;
     }
 
@@ -624,10 +633,27 @@ pub(crate) fn apply_daemon_ws_snapshot_rebuild(
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
+    if should_defer_blank_alt_screen_snapshot(&cached, &terminal_snapshot) {
+        if terminal_snapshot_debug_enabled() {
+            tracing::info!(
+                session_id = %ws_state.debug_session_id().unwrap_or_else(|| "<unknown>".to_owned()),
+                requested_generation,
+                "terminal snapshot rebuild deferred blank alt-screen frame"
+            );
+        }
+        return true;
+    }
     cached.terminal = Arc::new(terminal_snapshot);
     cached.updated_at_unix_ms = current_unix_timestamp_millis();
     cached.ready = true;
     drop(cached);
+    if terminal_snapshot_debug_enabled() {
+        tracing::info!(
+            session_id = %ws_state.debug_session_id().unwrap_or_else(|| "<unknown>".to_owned()),
+            requested_generation,
+            "terminal snapshot rebuild applied"
+        );
+    }
     ws_state.note_event_with_cached_snapshot();
     true
 }
@@ -1811,6 +1837,205 @@ pub(crate) mod tests {
             .snapshot()
             .unwrap_or_else(|| panic!("expected inline websocket snapshot for large redraw"));
         assert!(snapshot.terminal.output.contains(&"x".repeat(128)));
+    }
+
+    #[test]
+    fn interactive_ws_resume_delayed_redraw_still_publishes_snapshot_immediately() {
+        let ws_state = DaemonTerminalWsState::default();
+        ws_state.enter_interactive_output_window();
+
+        std::thread::sleep(Duration::from_millis(700));
+
+        let redraw = concat!(
+            "\x1b[?1049h\x1b[H\x1b[2J",
+            "+----------------------------------------------------------------------------------------------------------------------+\r\n",
+            "| codex resume test harness                                                          frame 00000001 |\r\n",
+            "+----------------------------------------------------------------------------------------------------------------------+\r\n",
+            "| Recent sessions                                                                                                      |\r\n",
+            "+----------------------------------------------------------------------------------------------------------------------+\r\n",
+            "| [01] running  session-001  model=gpt-5.4  cwd=/Users/penso/code/arbor  tokens=000321  eta=03s                  |\r\n",
+            "| [02] waiting  session-002  model=gpt-5.4  cwd=/Users/penso/code/arbor  tokens=000654  eta=09s                  |\r\n",
+            "| [03] done     session-003  model=gpt-5.4  cwd=/Users/penso/code/arbor  tokens=000777  eta=00s                  |\r\n",
+            "+----------------------------------------------------------------------------------------------------------------------+\r\n"
+        );
+        assert!(
+            ws_state.apply_output_bytes(redraw.as_bytes()),
+            "expected delayed redraw to stay on the inline snapshot path"
+        );
+
+        let snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected inline websocket snapshot for delayed redraw"));
+        assert!(
+            snapshot
+                .terminal
+                .output
+                .contains("codex resume test harness")
+        );
+        assert!(snapshot.terminal.output.contains("Recent sessions"));
+    }
+
+    #[test]
+    fn interactive_ws_continuous_output_extends_inline_snapshot_window() {
+        let ws_state = DaemonTerminalWsState::default();
+        ws_state.enter_interactive_output_window();
+
+        std::thread::sleep(Duration::from_millis(1_900));
+        assert!(
+            ws_state.apply_output_bytes(b"resume frame 1\r\n"),
+            "expected output just before the original cutoff to stay inline"
+        );
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            ws_state.apply_output_bytes(b"resume frame 2\r\n"),
+            "expected continued output to extend the inline snapshot window"
+        );
+
+        let snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected inline websocket snapshot after extension"));
+        assert!(snapshot.terminal.output.contains("resume frame 2"));
+    }
+
+    #[test]
+    fn interactive_ws_blank_alt_screen_transition_keeps_previous_snapshot_until_content() {
+        let ws_state = DaemonTerminalWsState::default();
+        ws_state.apply_snapshot_text(
+            "codex> prior output\r\n",
+            TerminalState::Running,
+            None,
+            Some(1),
+        );
+
+        ws_state.enter_interactive_output_window();
+        assert!(ws_state.apply_output_bytes(b"\x1b[?1049h\x1b[H\x1b[2J"));
+
+        let held_snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected prior snapshot to stay visible"));
+        assert!(
+            held_snapshot
+                .terminal
+                .output
+                .contains("codex> prior output"),
+            "expected prior output to remain visible while waiting for resume redraw: {:?}",
+            held_snapshot.terminal.output
+        );
+
+        assert!(ws_state.apply_output_bytes(b"codex resume test harness\r\nRecent sessions\r\n",));
+
+        let refreshed_snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected refreshed snapshot after redraw content"));
+        assert!(
+            refreshed_snapshot
+                .terminal
+                .output
+                .contains("codex resume test harness"),
+            "expected resume redraw content to replace held snapshot: {:?}",
+            refreshed_snapshot.terminal.output
+        );
+        assert!(
+            refreshed_snapshot.terminal.modes.alt_screen,
+            "expected redraw content to land on the alternate screen"
+        );
+    }
+
+    #[test]
+    fn blank_full_snapshot_keeps_previous_snapshot_until_content() {
+        let ws_state = DaemonTerminalWsState::default();
+        ws_state.apply_snapshot_text(
+            "codex> prior output\r\n",
+            TerminalState::Running,
+            None,
+            Some(1),
+        );
+
+        ws_state.apply_snapshot_text(
+            "\x1b[?1049h\x1b[H\x1b[2J",
+            TerminalState::Running,
+            None,
+            Some(2),
+        );
+
+        let held_snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected prior snapshot to stay visible"));
+        assert!(
+            held_snapshot
+                .terminal
+                .output
+                .contains("codex> prior output"),
+            "expected prior output to remain visible across blank full snapshot: {:?}",
+            held_snapshot.terminal.output
+        );
+
+        ws_state.apply_snapshot_text(
+            "codex resume test harness\r\nRecent sessions\r\n",
+            TerminalState::Running,
+            None,
+            Some(3),
+        );
+
+        let refreshed_snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected refreshed snapshot after full redraw content"));
+        assert!(
+            refreshed_snapshot
+                .terminal
+                .output
+                .contains("codex resume test harness"),
+            "expected full redraw content to replace held snapshot: {:?}",
+            refreshed_snapshot.terminal.output
+        );
+    }
+
+    #[test]
+    fn stale_full_snapshot_does_not_overwrite_newer_inline_redraw_content() {
+        let ws_state = DaemonTerminalWsState::default();
+        ws_state.apply_snapshot_text(
+            "codex> prior output\r\n",
+            TerminalState::Running,
+            None,
+            Some(1),
+        );
+
+        ws_state.enter_interactive_output_window();
+        assert!(ws_state.apply_output_bytes(
+            b"\x1b[?1049h\x1b[H\x1b[2Jcodex resume test harness\r\nRecent sessions\r\n",
+        ));
+
+        let visible_snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected inline redraw content to be visible"));
+        assert!(
+            visible_snapshot
+                .terminal
+                .output
+                .contains("codex resume test harness"),
+            "expected redraw content to be visible before stale snapshot arrives: {:?}",
+            visible_snapshot.terminal.output
+        );
+
+        ws_state.apply_snapshot_text(
+            "\x1b[?1049h\x1b[H\x1b[2J",
+            TerminalState::Running,
+            None,
+            Some(1),
+        );
+
+        let snapshot_after_stale = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected redraw content to survive stale snapshot"));
+        assert!(
+            snapshot_after_stale
+                .terminal
+                .output
+                .contains("codex resume test harness"),
+            "expected stale blank snapshot not to replace newer redraw content: {:?}",
+            snapshot_after_stale.terminal.output
+        );
     }
 
     #[test]

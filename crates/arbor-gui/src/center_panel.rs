@@ -257,6 +257,138 @@ impl ArborWindow {
                         )
                     },
                 );
+                if terminal_snapshot_debug_enabled() {
+                    let scroll_offset_y = self.terminal_scroll_handle.offset().y.to_f64() as f32;
+                    let scroll_bounds_height =
+                        self.terminal_scroll_handle.bounds().size.height.to_f64() as f32;
+                    let scroll_max_offset_y =
+                        self.terminal_scroll_handle.max_offset().height.to_f64() as f32;
+                    let scroll_top_px = (-scroll_offset_y).max(0.);
+                    let viewport_slice_range = terminal_viewport_slice_range(
+                        visible_range.start,
+                        styled_lines.len(),
+                        scroll_top_px,
+                        scroll_bounds_height,
+                        line_height,
+                    );
+                    let viewport_slice = &styled_lines[viewport_slice_range.clone()];
+                    let source_kind = if render_source.is_some() {
+                        "runtime"
+                    } else {
+                        "session"
+                    };
+                    let source_state = render_source
+                        .as_ref()
+                        .map_or(session.state, |source| source.state);
+                    let source_output_chars = render_source.as_ref().map_or_else(
+                        || session.output.chars().count(),
+                        |source| source.output.chars().count(),
+                    );
+                    let source_styled_line_count = render_source
+                        .as_ref()
+                        .map_or(session.styled_output.len(), |source| {
+                            source.styled_output.len()
+                        });
+                    let source_visible_content = render_source.as_ref().map_or_else(
+                        || {
+                            terminal_styled_lines_have_visible_content(&session.styled_output)
+                                || !session.output.is_empty()
+                        },
+                        terminal_render_source_has_visible_content,
+                    );
+                    let source_non_whitespace_content = render_source.as_ref().map_or_else(
+                        || {
+                            terminal_styled_lines_have_non_whitespace_text(&session.styled_output)
+                                || session
+                                    .output
+                                    .chars()
+                                    .any(|character| !character.is_whitespace())
+                        },
+                        |source| {
+                            if !source.styled_output.is_empty() {
+                                terminal_styled_lines_have_non_whitespace_text(source.styled_output)
+                            } else {
+                                source
+                                    .output
+                                    .chars()
+                                    .any(|character| !character.is_whitespace())
+                            }
+                        },
+                    );
+                    let rendered_visible_content =
+                        terminal_styled_lines_have_visible_content(&styled_lines);
+                    let rendered_non_whitespace_content =
+                        terminal_styled_lines_have_non_whitespace_text(&styled_lines);
+                    let rendered_last_non_whitespace_line =
+                        terminal_last_non_whitespace_line_index(&styled_lines);
+                    let viewport_visible_content =
+                        terminal_styled_lines_have_visible_content(viewport_slice);
+                    let viewport_non_whitespace_content =
+                        terminal_styled_lines_have_non_whitespace_text(viewport_slice);
+                    let viewport_last_non_whitespace_line =
+                        terminal_last_non_whitespace_line_index(viewport_slice);
+                    let source_last_non_whitespace_line = render_source.as_ref().map_or_else(
+                        || terminal_last_non_whitespace_line_index(&session.styled_output),
+                        |source| {
+                            if !source.styled_output.is_empty() {
+                                terminal_last_non_whitespace_line_index(source.styled_output)
+                            } else {
+                                lines_for_display(source.output, false)
+                                    .iter()
+                                    .rposition(|line| {
+                                        line.chars().any(|character| !character.is_whitespace())
+                                    })
+                            }
+                        },
+                    );
+                    let viewport_first_line_excerpt = viewport_slice
+                        .first()
+                        .map(|line| terminal_styled_line_excerpt(line, 96))
+                        .unwrap_or_default();
+                    let viewport_last_line_excerpt = viewport_slice
+                        .last()
+                        .map(|line| terminal_styled_line_excerpt(line, 96))
+                        .unwrap_or_default();
+                    let viewport_last_non_whitespace_excerpt = viewport_last_non_whitespace_line
+                        .and_then(|index| viewport_slice.get(index))
+                        .map(|line| terminal_styled_line_excerpt(line, 96))
+                        .unwrap_or_default();
+                    tracing::info!(
+                        session_id = session.id,
+                        source_kind,
+                        ?source_state,
+                        source_output_chars,
+                        source_styled_line_count,
+                        source_visible_content,
+                        source_non_whitespace_content,
+                        source_last_non_whitespace_line,
+                        source_cursor_line = render_source
+                            .as_ref()
+                            .and_then(|source| source.cursor.map(|cursor| cursor.line))
+                            .or(session.cursor.map(|cursor| cursor.line)),
+                        line_count,
+                        visible_start = visible_range.start,
+                        visible_end = visible_range.end,
+                        rendered_line_count = styled_lines.len(),
+                        rendered_visible_content,
+                        rendered_non_whitespace_content,
+                        rendered_last_non_whitespace_line,
+                        viewport_slice_start = viewport_slice_range.start,
+                        viewport_slice_end = viewport_slice_range.end,
+                        viewport_visible_content,
+                        viewport_non_whitespace_content,
+                        viewport_last_non_whitespace_line,
+                        viewport_absolute_last_non_whitespace_line = viewport_last_non_whitespace_line
+                            .map(|index| visible_range.start + viewport_slice_range.start + index),
+                        viewport_first_line_excerpt = %viewport_first_line_excerpt,
+                        viewport_last_line_excerpt = %viewport_last_line_excerpt,
+                        viewport_last_non_whitespace_excerpt = %viewport_last_non_whitespace_excerpt,
+                        scroll_offset_y = scroll_offset_y as f64,
+                        scroll_bounds_height = scroll_bounds_height as f64,
+                        scroll_max_offset_y = scroll_max_offset_y as f64,
+                        "terminal render trace"
+                    );
+                }
 
                 div()
                     .h_full()
@@ -306,6 +438,7 @@ impl ArborWindow {
                                         cx.listener(Self::handle_terminal_output_mouse_up),
                                     )
                                     .child(render_terminal_lines(
+                                        session.id,
                                         styled_lines,
                                         theme,
                                         cell_width,
