@@ -97,7 +97,6 @@ pub(crate) const INACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL: Duration =
     Duration::from_millis(1000);
 pub(crate) const TERMINAL_OUTPUT_FOLLOW_LOCK_DURATION: Duration = Duration::from_millis(48);
 pub(crate) const TERMINAL_OUTPUT_FOLLOW_SCROLL_DELAY: Duration = Duration::from_millis(16);
-pub(crate) const TERMINAL_OUTPUT_FOLLOW_MAX_PASSES: usize = 3;
 // Zed processes the first wakeup immediately and batches follow-up terminal work in a
 // 4 ms window. Match that cadence for Arbor's active terminals so bursty commands like
 // `df` do not visibly stall between PTY chunks.
