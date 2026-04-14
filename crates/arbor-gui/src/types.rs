@@ -1,7 +1,11 @@
 use {
     super::*,
     serde::{Deserialize, Serialize},
-    std::sync::{OnceLock, atomic::AtomicU64},
+    std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+        sync::{OnceLock, atomic::AtomicU64},
+    },
 };
 
 /// Identifies a sidebar item for persisted UI ordering.
@@ -232,7 +236,7 @@ pub(crate) struct TerminalSession {
     pub(crate) runtime: Option<SharedTerminalRuntime>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TerminalState {
     Running,
     Completed,
@@ -502,6 +506,7 @@ pub(crate) struct DaemonTerminalRuntime {
     pub(crate) daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     pub(crate) ws_state: Arc<DaemonTerminalWsState>,
     pub(crate) last_synced_ws_generation: AtomicU64,
+    pub(crate) last_synced_snapshot_generation: AtomicU64,
     pub(crate) snapshot_request_in_flight: Arc<AtomicBool>,
     pub(crate) snapshot_request_pending: Arc<AtomicBool>,
     pub(crate) kind: TerminalRuntimeKind,
@@ -515,6 +520,7 @@ pub(crate) struct DaemonTerminalCachedSnapshot {
     pub(crate) terminal: Arc<arbor_terminal_emulator::TerminalSnapshot>,
     pub(crate) state: TerminalState,
     pub(crate) updated_at_unix_ms: Option<u64>,
+    pub(crate) render_signature: u64,
     pub(crate) ready: bool,
 }
 
@@ -530,6 +536,7 @@ impl Default for DaemonTerminalCachedSnapshot {
             }),
             state: TerminalState::Running,
             updated_at_unix_ms: None,
+            render_signature: 0,
             ready: false,
         }
     }
@@ -603,10 +610,12 @@ impl DaemonTerminalWsState {
         }
     }
 
-    pub(crate) fn note_event_with_cached_snapshot(&self) {
+    pub(crate) fn note_event_with_cached_snapshot(&self, render_changed: bool) {
         let generation = self.event_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        self.snapshot_generation
-            .store(generation, Ordering::Relaxed);
+        if render_changed {
+            self.snapshot_generation
+                .store(generation, Ordering::Relaxed);
+        }
         if let Some(ref tx) = self.poll_notify {
             let _ = tx.send(());
         }
@@ -614,6 +623,10 @@ impl DaemonTerminalWsState {
 
     pub(crate) fn event_generation(&self) -> u64 {
         self.event_generation.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn snapshot_generation(&self) -> u64 {
+        self.snapshot_generation.load(Ordering::Relaxed)
     }
 
     pub(crate) fn note_emulator_mutation(&self) -> u64 {
@@ -787,10 +800,13 @@ impl DaemonTerminalWsState {
             );
             return;
         }
+        let render_signature = terminal_render_signature(state, &terminal_snapshot);
+        let render_changed = cached.render_signature != render_signature;
         *cached = DaemonTerminalCachedSnapshot {
             terminal: Arc::new(terminal_snapshot),
             state,
             updated_at_unix_ms: updated_at_unix_ms.or_else(current_unix_timestamp_millis),
+            render_signature,
             ready: true,
         };
         drop(cached);
@@ -805,7 +821,7 @@ impl DaemonTerminalWsState {
                 .map(|cached| cached.terminal.as_ref()),
             Some(updated_at_unix_ms),
         );
-        self.note_event_with_cached_snapshot();
+        self.note_event_with_cached_snapshot(render_changed);
     }
 
     pub(crate) fn apply_output_bytes(&self, bytes: &[u8]) -> bool {
@@ -861,8 +877,11 @@ impl DaemonTerminalWsState {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
+        let render_signature = terminal_render_signature(cached.state, &terminal_snapshot);
+        let render_changed = cached.render_signature != render_signature;
         cached.terminal = Arc::new(terminal_snapshot);
         cached.updated_at_unix_ms = current_unix_timestamp_millis();
+        cached.render_signature = render_signature;
         cached.ready = true;
         drop(cached);
         log_terminal_snapshot_debug(
@@ -876,7 +895,7 @@ impl DaemonTerminalWsState {
                 .map(|cached| cached.terminal.as_ref()),
             None,
         );
-        self.note_event_with_cached_snapshot();
+        self.note_event_with_cached_snapshot(render_changed);
         true
     }
 
@@ -888,11 +907,14 @@ impl DaemonTerminalWsState {
         cached.state = state;
         let mut terminal = (*cached.terminal).clone();
         terminal.exit_code = exit_code;
+        let render_signature = terminal_render_signature(state, &terminal);
+        let render_changed = cached.render_signature != render_signature;
         cached.terminal = Arc::new(terminal);
         cached.updated_at_unix_ms = current_unix_timestamp_millis();
+        cached.render_signature = render_signature;
         cached.ready = true;
         drop(cached);
-        self.note_event_with_cached_snapshot();
+        self.note_event_with_cached_snapshot(render_changed);
     }
 
     pub(crate) fn resize_emulator(&self, rows: u16, cols: u16) {
@@ -917,6 +939,7 @@ impl DaemonTerminalWsState {
             Err(poisoned) => poisoned.into_inner(),
         };
         if cached.ready {
+            cached.render_signature = terminal_render_signature(cached.state, &terminal_snapshot);
             cached.terminal = Arc::new(terminal_snapshot);
             cached.updated_at_unix_ms = current_unix_timestamp_millis();
         }
@@ -925,11 +948,6 @@ impl DaemonTerminalWsState {
     }
 
     pub(crate) fn snapshot(&self) -> Option<DaemonTerminalCachedSnapshot> {
-        let current_generation = self.event_generation();
-        if self.snapshot_generation.load(Ordering::Relaxed) != current_generation {
-            return None;
-        }
-
         self.snapshot
             .lock()
             .ok()
@@ -961,6 +979,26 @@ pub(crate) fn terminal_snapshot_has_visible_content(
         .styled_lines
         .iter()
         .any(|line| !(line.cells.is_empty() && line.runs.is_empty()))
+}
+
+pub(crate) fn terminal_render_signature(
+    state: TerminalState,
+    snapshot: &arbor_terminal_emulator::TerminalSnapshot,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    state.hash(&mut hasher);
+    snapshot.styled_lines.len().hash(&mut hasher);
+    snapshot.cursor.hash(&mut hasher);
+    snapshot.modes.hash(&mut hasher);
+    snapshot.exit_code.hash(&mut hasher);
+    let tail_start = snapshot
+        .styled_lines
+        .len()
+        .saturating_sub(ACTIVE_DAEMON_RENDER_SIGNATURE_TAIL_LINES);
+    for line in &snapshot.styled_lines[tail_start..] {
+        line.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 pub(crate) fn terminal_snapshot_debug_enabled() -> bool {
@@ -1418,7 +1456,6 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
     ) -> TerminalRuntimeSyncOutcome {
         let mut outcome = TerminalRuntimeSyncOutcome::default();
         let observed_ws_generation = self.ws_state.event_generation();
-        let last_synced_generation = self.last_synced_ws_generation.load(Ordering::Relaxed);
         let refresh_requested = self.ws_state.take_snapshot_refresh_requested();
 
         if self.clear_global_daemon_on_connection_refused && self.ws_state.take_connection_refused()
@@ -1473,9 +1510,15 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
             return outcome;
         };
 
+        let observed_snapshot_generation = self.ws_state.snapshot_generation();
+        let last_synced_snapshot_generation =
+            self.last_synced_snapshot_generation.load(Ordering::Relaxed);
         self.last_synced_ws_generation
             .store(observed_ws_generation, Ordering::Relaxed);
-        outcome.repaint = is_active && observed_ws_generation > last_synced_generation;
+        self.last_synced_snapshot_generation
+            .store(observed_snapshot_generation, Ordering::Relaxed);
+        outcome.repaint =
+            is_active && observed_snapshot_generation > last_synced_snapshot_generation;
 
         let should_materialize_active_snapshot = !is_active
             || snapshot.state != TerminalState::Running
@@ -2760,9 +2803,14 @@ pub(crate) struct ArborWindow {
     pub(crate) issue_details_focus: FocusHandle,
     pub(crate) welcome_clone_focus: FocusHandle,
     pub(crate) terminal_scroll_handle: ScrollHandle,
+    pub(crate) terminal_follow_output_active: bool,
+    pub(crate) pending_terminal_follow_scroll: bool,
     pub(crate) terminal_follow_output_until: Option<Instant>,
+    pub(crate) last_terminal_follow_scroll_max_offset_y: Option<Pixels>,
     pub(crate) last_terminal_scroll_offset_y: Option<Pixels>,
     pub(crate) last_terminal_scroll_max_offset_y: Option<Pixels>,
+    pub(crate) last_active_terminal_visible_signature_session_id: Option<u64>,
+    pub(crate) last_active_terminal_visible_signature: Option<u64>,
     pub(crate) issue_details_scroll_handle: ScrollHandle,
     pub(crate) issue_details_scrollbar_drag_offset: Option<Pixels>,
     pub(crate) last_terminal_grid_size: Option<(u16, u16)>,

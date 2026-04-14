@@ -96,6 +96,8 @@ pub(crate) const ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL: Duration = Duration
 pub(crate) const INACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL: Duration =
     Duration::from_millis(1000);
 pub(crate) const TERMINAL_OUTPUT_FOLLOW_LOCK_DURATION: Duration = Duration::from_millis(48);
+pub(crate) const TERMINAL_OUTPUT_FOLLOW_SCROLL_DELAY: Duration = Duration::from_millis(16);
+pub(crate) const TERMINAL_OUTPUT_FOLLOW_MAX_PASSES: usize = 3;
 // Zed processes the first wakeup immediately and batches follow-up terminal work in a
 // 4 ms window. Match that cadence for Arbor's active terminals so bursty commands like
 // `df` do not visibly stall between PTY chunks.
@@ -110,6 +112,9 @@ pub(crate) const INTERACTIVE_DAEMON_INLINE_SNAPSHOT_WINDOW: Duration = Duration:
 // budget above that so `df`-style bursts stay on the fast path instead of waiting for
 // a deferred snapshot rebuild.
 pub(crate) const INTERACTIVE_DAEMON_INLINE_SNAPSHOT_MAX_BYTES: usize = 16 * 1024;
+// Active daemon terminals only paint the visible bottom slice. Use a small tail
+// signature so offscreen scrollback churn does not invalidate the whole canvas.
+pub(crate) const ACTIVE_DAEMON_RENDER_SIGNATURE_TAIL_LINES: usize = 128;
 pub(crate) const ACTIVE_SSH_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(90);
 pub(crate) const INACTIVE_SSH_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(250);
 pub(crate) const ACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_secs(2);

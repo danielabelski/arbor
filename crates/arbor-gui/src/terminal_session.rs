@@ -378,6 +378,11 @@ impl ArborWindow {
             current_scroll_offset_y,
             is_near_bottom,
         );
+        if moved_away_from_bottom {
+            self.terminal_follow_output_active = false;
+        } else if is_near_bottom {
+            self.terminal_follow_output_active = true;
+        }
         if follow_lock_active && moved_away_from_bottom {
             self.terminal_follow_output_until = None;
             if terminal_snapshot_debug_enabled() {
@@ -389,11 +394,17 @@ impl ArborWindow {
                     current_scroll_offset_y = current_scroll_offset_y.to_f64(),
                     scroll_max_offset_y = self.terminal_scroll_handle.max_offset().height.to_f64(),
                     is_near_bottom,
+                    follow_output_active = self.terminal_follow_output_active,
                     "terminal follow trace: cancelled follow lock after upward scroll"
                 );
             }
         }
-        let follow_output = is_near_bottom || follow_lock_active || interactive_follow_active;
+        let follow_output = terminal_should_follow_output(
+            is_near_bottom,
+            follow_lock_active,
+            interactive_follow_active,
+            self.terminal_follow_output_active,
+        );
         if terminal_snapshot_debug_enabled() {
             tracing::info!(
                 active_terminal_id = self.active_terminal_id_for_selected_worktree(),
@@ -408,6 +419,7 @@ impl ArborWindow {
                 is_near_bottom,
                 follow_lock_active,
                 interactive_follow_active,
+                follow_output_active = self.terminal_follow_output_active,
                 moved_away_from_bottom,
                 follow_output,
                 "terminal follow trace: pre-sync state"
@@ -440,10 +452,45 @@ impl ArborWindow {
             if !runtime.should_sync(&self.terminals[index], is_active, target_grid_size, now) {
                 continue;
             }
-            let outcome = {
+            let mut outcome = {
                 let session = &mut self.terminals[index];
                 runtime.sync(session, is_active, target_grid_size)
             };
+            if is_active && (outcome.repaint || outcome.changed) {
+                let render_snapshot = runtime.render_snapshot(&self.terminals[index]);
+                let render_source = render_snapshot.as_ref().map_or_else(
+                    || terminal_render_source_for_session(&self.terminals[index]),
+                    |snapshot| {
+                        terminal_render_source_for_snapshot(
+                            session_id,
+                            snapshot.state,
+                            &snapshot.terminal,
+                        )
+                    },
+                );
+                let line_count = terminal_render_line_count_for_source(&render_source, None);
+                let visible_range = terminal_visible_line_range(
+                    &self.terminal_scroll_handle,
+                    line_count,
+                    terminal_metrics.line_height,
+                );
+                let visible_signature =
+                    terminal_visible_render_signature_for_source(&render_source, visible_range);
+                let same_visible_signature = self.last_active_terminal_visible_signature_session_id
+                    == Some(session_id)
+                    && self.last_active_terminal_visible_signature == Some(visible_signature);
+                if outcome.repaint && !outcome.changed && same_visible_signature {
+                    outcome.repaint = false;
+                    if terminal_snapshot_debug_enabled() {
+                        tracing::info!(
+                            active_terminal_id = session_id,
+                            "terminal follow trace: suppressed repaint for unchanged visible slice"
+                        );
+                    }
+                }
+                self.last_active_terminal_visible_signature_session_id = Some(session_id);
+                self.last_active_terminal_visible_signature = Some(visible_signature);
+            }
             if outcome.record_sync_at {
                 self.terminals[index].last_runtime_sync_at = Some(now);
             }
@@ -514,8 +561,9 @@ impl ArborWindow {
                 self.last_terminal_scroll_max_offset_y,
                 self.terminal_scroll_handle.max_offset().height,
             );
+            let force_scheduled_follow = follow_lock_active || interactive_follow_active;
             if should_auto_follow_terminal_output(changed || repaint, follow_output)
-                && (needs_bottom_scroll || scroll_extent_changed)
+                && (force_scheduled_follow || needs_bottom_scroll || scroll_extent_changed)
             {
                 if terminal_snapshot_debug_enabled() {
                     tracing::info!(
@@ -523,18 +571,22 @@ impl ArborWindow {
                         changed,
                         repaint,
                         follow_output,
+                        force_scheduled_follow,
                         needs_bottom_scroll,
                         scroll_extent_changed,
-                        "terminal follow trace: auto-following output"
+                        "terminal follow trace: scheduling output follow"
                     );
                 }
-                self.request_terminal_scroll_to_bottom();
+                if let Some(active_terminal_id) = active_terminal_id {
+                    self.schedule_terminal_follow_scroll(active_terminal_id, cx);
+                }
             } else if terminal_snapshot_debug_enabled() {
                 tracing::info!(
                     active_terminal_id,
                     changed,
                     repaint,
                     follow_output,
+                    force_scheduled_follow,
                     needs_bottom_scroll,
                     scroll_extent_changed,
                     "terminal follow trace: skipped auto-follow"

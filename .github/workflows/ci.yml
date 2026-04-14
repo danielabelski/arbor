@@ -127,8 +127,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libavahi-client-dev
       - name: Run terminal workload benchmark helper
         run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} test -p arbor-terminal-emulator --test workload_benchmark -- --ignored --nocapture
+      - name: Run GUI terminal workload benchmark helper
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} test -p arbor-gui benchmark_resume_scroll_gui_feedback_loop -- --ignored --nocapture
 
   ghostty-vt:
     name: Ghostty VT

@@ -1,4 +1,10 @@
-use super::*;
+use {
+    super::*,
+    std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    },
+};
 
 const TERMINAL_RENDER_OVERSCAN_LINES: usize = 12;
 const TERMINAL_INITIAL_RENDER_LINES: usize = 240;
@@ -329,6 +335,34 @@ pub(crate) fn terminal_viewport_slice_range(
         .max(start.saturating_add(1))
         .min(rendered_line_count);
     start..end
+}
+
+pub(crate) fn terminal_visible_render_signature_for_source(
+    source: &TerminalRenderSource<'_>,
+    visible_range: std::ops::Range<usize>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    source.state.hash(&mut hasher);
+    source.cursor.hash(&mut hasher);
+    visible_range.start.hash(&mut hasher);
+    visible_range.end.hash(&mut hasher);
+    terminal_render_line_count_for_source(source, None).hash(&mut hasher);
+
+    if !source.styled_output.is_empty() {
+        let start = visible_range.start.min(source.styled_output.len());
+        let end = visible_range.end.min(source.styled_output.len());
+        source.styled_output[start..end].hash(&mut hasher);
+    } else {
+        for line in lines_for_display(source.output, false)
+            .into_iter()
+            .skip(visible_range.start)
+            .take(visible_range.len())
+        {
+            line.hash(&mut hasher);
+        }
+    }
+
+    hasher.finish()
 }
 
 fn remap_terminal_line_palette(lines: &mut [TerminalStyledLine], theme: ThemePalette) {
@@ -1324,6 +1358,41 @@ pub(crate) fn should_auto_follow_terminal_output(
     terminal_updated && should_follow_output
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TerminalScheduledFollowPassDecision {
+    pub(crate) perform_scroll: bool,
+    pub(crate) schedule_retry: bool,
+}
+
+pub(crate) fn terminal_scheduled_follow_pass_decision(
+    pass_index: usize,
+    max_passes: usize,
+    should_follow: bool,
+    should_scroll: bool,
+) -> TerminalScheduledFollowPassDecision {
+    if !should_follow || max_passes == 0 {
+        return TerminalScheduledFollowPassDecision {
+            perform_scroll: false,
+            schedule_retry: false,
+        };
+    }
+
+    let has_retry_budget = pass_index.saturating_add(1) < max_passes;
+    TerminalScheduledFollowPassDecision {
+        perform_scroll: should_scroll,
+        schedule_retry: has_retry_budget && (pass_index == 0 || should_scroll),
+    }
+}
+
+pub(crate) fn terminal_should_follow_output(
+    is_near_bottom: bool,
+    follow_lock_active: bool,
+    interactive_follow_active: bool,
+    sticky_follow_active: bool,
+) -> bool {
+    is_near_bottom || follow_lock_active || interactive_follow_active || sticky_follow_active
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -1756,8 +1825,78 @@ mod tests {
     }
 
     #[test]
+    fn sticky_follow_keeps_output_pinned_between_bursts() {
+        assert!(terminal_should_follow_output(false, false, false, true));
+        assert!(terminal_should_follow_output(false, false, true, false));
+        assert!(terminal_should_follow_output(false, true, false, false));
+        assert!(terminal_should_follow_output(true, false, false, false));
+        assert!(!terminal_should_follow_output(false, false, false, false));
+    }
+
+    #[test]
     fn auto_follow_is_disabled_without_new_output() {
         assert!(!should_auto_follow_terminal_output(false, false));
+    }
+
+    #[test]
+    fn initial_scheduled_follow_pass_allows_one_settle_retry() {
+        assert_eq!(
+            terminal_scheduled_follow_pass_decision(0, 3, true, false),
+            TerminalScheduledFollowPassDecision {
+                perform_scroll: false,
+                schedule_retry: true,
+            }
+        );
+        assert_eq!(
+            terminal_scheduled_follow_pass_decision(0, 3, true, true),
+            TerminalScheduledFollowPassDecision {
+                perform_scroll: true,
+                schedule_retry: true,
+            }
+        );
+    }
+
+    #[test]
+    fn later_scheduled_follow_passes_retry_only_after_real_scroll() {
+        assert_eq!(
+            terminal_scheduled_follow_pass_decision(1, 3, true, false),
+            TerminalScheduledFollowPassDecision {
+                perform_scroll: false,
+                schedule_retry: false,
+            }
+        );
+        assert_eq!(
+            terminal_scheduled_follow_pass_decision(1, 3, true, true),
+            TerminalScheduledFollowPassDecision {
+                perform_scroll: true,
+                schedule_retry: true,
+            }
+        );
+        assert_eq!(
+            terminal_scheduled_follow_pass_decision(2, 3, true, true),
+            TerminalScheduledFollowPassDecision {
+                perform_scroll: true,
+                schedule_retry: false,
+            }
+        );
+    }
+
+    #[test]
+    fn scheduled_follow_passes_stop_without_follow_state() {
+        assert_eq!(
+            terminal_scheduled_follow_pass_decision(0, 3, false, true),
+            TerminalScheduledFollowPassDecision {
+                perform_scroll: false,
+                schedule_retry: false,
+            }
+        );
+        assert_eq!(
+            terminal_scheduled_follow_pass_decision(0, 0, true, true),
+            TerminalScheduledFollowPassDecision {
+                perform_scroll: false,
+                schedule_retry: false,
+            }
+        );
     }
 
     #[test]
@@ -1818,6 +1957,78 @@ mod tests {
         assert!(terminal_scroll_extent_changed(Some(px(32.)), px(64.)));
         assert!(!terminal_scroll_extent_changed(Some(px(64.)), px(64.)));
         assert!(!terminal_scroll_extent_changed(Some(px(64.)), px(64.5)));
+    }
+
+    #[test]
+    fn visible_render_signature_ignores_offscreen_scrollback_changes() {
+        let source = |header: &str| TerminalRenderSource {
+            session_id: 1,
+            state: TerminalState::Running,
+            output: "",
+            styled_output: Box::leak(Box::new(
+                std::iter::once(TerminalStyledLine {
+                    cells: Vec::new(),
+                    runs: vec![TerminalStyledRun {
+                        text: header.to_owned(),
+                        fg: 0xffffff,
+                        bg: 0x000000,
+                    }],
+                })
+                .chain((1..220).map(|index| TerminalStyledLine {
+                    cells: Vec::new(),
+                    runs: vec![TerminalStyledRun {
+                        text: format!("visible line {index:03}"),
+                        fg: 0xffffff,
+                        bg: 0x000000,
+                    }],
+                }))
+                .collect::<Vec<_>>(),
+            )),
+            cursor: Some(TerminalCursor {
+                line: 219,
+                column: 0,
+            }),
+        };
+
+        let visible_range = 160..220;
+        let first = source("header one");
+        let second = source("header two");
+
+        assert_eq!(
+            terminal_visible_render_signature_for_source(&first, visible_range.clone()),
+            terminal_visible_render_signature_for_source(&second, visible_range),
+        );
+    }
+
+    #[test]
+    fn visible_render_signature_changes_when_viewport_changes() {
+        let styled_output = Box::leak(Box::new(
+            (0..220)
+                .map(|index| TerminalStyledLine {
+                    cells: Vec::new(),
+                    runs: vec![TerminalStyledRun {
+                        text: format!("line {index:03}"),
+                        fg: 0xffffff,
+                        bg: 0x000000,
+                    }],
+                })
+                .collect::<Vec<_>>(),
+        ));
+        let source = TerminalRenderSource {
+            session_id: 1,
+            state: TerminalState::Running,
+            output: "",
+            styled_output,
+            cursor: Some(TerminalCursor {
+                line: 219,
+                column: 0,
+            }),
+        };
+
+        assert_ne!(
+            terminal_visible_render_signature_for_source(&source, 160..220),
+            terminal_visible_render_signature_for_source(&source, 159..219),
+        );
     }
 
     #[test]

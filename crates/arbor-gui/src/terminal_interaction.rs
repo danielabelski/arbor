@@ -65,12 +65,16 @@ impl ArborWindow {
             );
         }
         self.terminal_scroll_handle.scroll_to_bottom();
+        self.terminal_follow_output_active = true;
         self.terminal_follow_output_until =
             Some(Instant::now() + TERMINAL_OUTPUT_FOLLOW_LOCK_DURATION);
+        self.last_terminal_follow_scroll_max_offset_y =
+            Some(self.terminal_scroll_handle.max_offset().height);
         if terminal_snapshot_debug_enabled() {
             tracing::info!(
                 active_terminal_id = self.active_terminal_id_for_selected_worktree(),
                 already_at_bottom,
+                follow_output_active = self.terminal_follow_output_active,
                 scroll_performed = true,
                 new_offset_y = self.terminal_scroll_handle.offset().y.to_f64(),
                 max_offset_y = self.terminal_scroll_handle.max_offset().height.to_f64(),
@@ -81,6 +85,85 @@ impl ArborWindow {
                 "terminal scroll request applied trace"
             );
         }
+    }
+
+    pub(crate) fn schedule_terminal_follow_scroll(
+        &mut self,
+        session_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_terminal_follow_scroll {
+            if terminal_snapshot_debug_enabled() {
+                tracing::info!(
+                    session_id,
+                    active_terminal_id = self.active_terminal_id_for_selected_worktree(),
+                    "terminal follow trace: skipped duplicate scheduled follow scroll"
+                );
+            }
+            return;
+        }
+
+        self.pending_terminal_follow_scroll = true;
+        let this = cx.entity().downgrade();
+        cx.spawn(async move |_this, cx| {
+            cx.background_spawn(async move {
+                std::thread::sleep(TERMINAL_OUTPUT_FOLLOW_SCROLL_DELAY);
+            })
+            .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.pending_terminal_follow_scroll = false;
+                if this.active_terminal_id_for_selected_worktree() != Some(session_id) {
+                    return;
+                }
+
+                let now = Instant::now();
+                let is_near_bottom = terminal_scroll_is_near_bottom(&this.terminal_scroll_handle);
+                let follow_lock_active =
+                    terminal_follow_lock_is_active(this.terminal_follow_output_until, now);
+                let interactive_follow_active = this
+                    .terminals
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .and_then(|session| session.interactive_sync_until)
+                    .is_some_and(|deadline| {
+                        terminal_interactive_follow_is_active(Some(deadline), now)
+                    });
+                let should_follow = terminal_should_follow_output(
+                    is_near_bottom,
+                    follow_lock_active,
+                    interactive_follow_active,
+                    this.terminal_follow_output_active,
+                );
+                let scroll_extent_changed = terminal_scroll_extent_changed(
+                    this.last_terminal_follow_scroll_max_offset_y,
+                    this.terminal_scroll_handle.max_offset().height,
+                );
+                let should_scroll = !is_near_bottom || scroll_extent_changed;
+
+                if terminal_snapshot_debug_enabled() {
+                    tracing::info!(
+                        session_id,
+                        should_follow,
+                        is_near_bottom,
+                        follow_lock_active,
+                        interactive_follow_active,
+                        follow_output_active = this.terminal_follow_output_active,
+                        scroll_extent_changed,
+                        should_scroll,
+                        offset_y = this.terminal_scroll_handle.offset().y.to_f64(),
+                        max_offset_y = this.terminal_scroll_handle.max_offset().height.to_f64(),
+                        "terminal follow trace: applying scheduled follow scroll"
+                    );
+                }
+
+                if should_follow && should_scroll {
+                    this.request_terminal_scroll_to_bottom();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn send_terminal_action_input(
@@ -152,27 +235,23 @@ impl ArborWindow {
     }
 
     pub(crate) fn notify_after_terminal_input(&mut self, session_id: u64, cx: &mut Context<Self>) {
-        let follow_bottom = self.active_terminal_id_for_selected_worktree() == Some(session_id)
-            && terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
+        let follow_active_terminal =
+            self.active_terminal_id_for_selected_worktree() == Some(session_id);
+        let follow_bottom =
+            follow_active_terminal && terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
         if terminal_snapshot_debug_enabled() {
             tracing::info!(
                 session_id,
+                follow_active_terminal,
                 follow_bottom,
                 offset_y = self.terminal_scroll_handle.offset().y.to_f64(),
                 max_offset_y = self.terminal_scroll_handle.max_offset().height.to_f64(),
                 "terminal input follow trace"
             );
         }
-        if follow_bottom {
-            let this = cx.entity().downgrade();
-            cx.defer(move |cx| {
-                let _ = this.update(cx, |this, cx| {
-                    if this.active_terminal_id_for_selected_worktree() == Some(session_id) {
-                        this.request_terminal_scroll_to_bottom();
-                        cx.notify();
-                    }
-                });
-            });
+        if follow_active_terminal {
+            self.terminal_follow_output_active = true;
+            self.schedule_terminal_follow_scroll(session_id, cx);
         }
         cx.notify();
     }

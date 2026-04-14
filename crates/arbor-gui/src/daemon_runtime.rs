@@ -36,6 +36,7 @@ pub(crate) fn local_daemon_runtime(
         daemon,
         ws_state,
         last_synced_ws_generation: std::sync::atomic::AtomicU64::new(0),
+        last_synced_snapshot_generation: std::sync::atomic::AtomicU64::new(0),
         snapshot_request_in_flight,
         snapshot_request_pending,
         kind: TerminalRuntimeKind::Local,
@@ -643,8 +644,11 @@ pub(crate) fn apply_daemon_ws_snapshot_rebuild(
         }
         return true;
     }
+    let render_signature = terminal_render_signature(cached.state, &terminal_snapshot);
+    let render_changed = cached.render_signature != render_signature;
     cached.terminal = Arc::new(terminal_snapshot);
     cached.updated_at_unix_ms = current_unix_timestamp_millis();
+    cached.render_signature = render_signature;
     cached.ready = true;
     drop(cached);
     if terminal_snapshot_debug_enabled() {
@@ -654,7 +658,7 @@ pub(crate) fn apply_daemon_ws_snapshot_rebuild(
             "terminal snapshot rebuild applied"
         );
     }
-    ws_state.note_event_with_cached_snapshot();
+    ws_state.note_event_with_cached_snapshot(render_changed);
     true
 }
 
@@ -1392,12 +1396,13 @@ pub(crate) mod tests {
     use {
         super::*,
         crate::terminal_daemon_http::{HttpTerminalDaemon, WebsocketConnectConfig},
+        arbor_terminal_emulator::resume_scroll_workload,
         std::{
             sync::{
                 Arc,
                 atomic::{AtomicU64, Ordering},
             },
-            time::Instant,
+            time::{Duration, Instant},
         },
     };
 
@@ -1479,6 +1484,7 @@ pub(crate) mod tests {
             daemon: Arc::new(daemon),
             ws_state: Arc::new(DaemonTerminalWsState::default()),
             last_synced_ws_generation: AtomicU64::new(0),
+            last_synced_snapshot_generation: AtomicU64::new(0),
             snapshot_request_in_flight: Arc::new(AtomicBool::new(false)),
             snapshot_request_pending: Arc::new(AtomicBool::new(false)),
             kind: TerminalRuntimeKind::Local,
@@ -2220,8 +2226,50 @@ pub(crate) mod tests {
         let second = runtime.sync(&mut session, true, None);
 
         assert!(!second.changed);
+        assert!(!second.repaint);
         assert_eq!(session.updated_at_unix_ms, Some(99));
         assert!(session.output.contains("codex> working"));
+    }
+
+    #[test]
+    fn unchanged_daemon_snapshot_does_not_advance_snapshot_generation() {
+        let ws_state = DaemonTerminalWsState::default();
+
+        ws_state.apply_snapshot_text("codex> working\r\n", TerminalState::Running, None, Some(42));
+        let first_generation = ws_state.snapshot_generation();
+
+        ws_state.apply_snapshot_text("codex> working\r\n", TerminalState::Running, None, Some(99));
+        let second_generation = ws_state.snapshot_generation();
+
+        assert_eq!(first_generation, second_generation);
+    }
+
+    #[test]
+    fn offscreen_scrollback_change_does_not_advance_snapshot_generation() {
+        let ws_state = DaemonTerminalWsState::default();
+        let snapshot_text = |header: &str| {
+            std::iter::once(format!("{header}\r\n"))
+                .chain((1..220).map(|index| format!("visible line {index:03}\r\n")))
+                .collect::<String>()
+        };
+
+        ws_state.apply_snapshot_text(
+            &snapshot_text("header one"),
+            TerminalState::Running,
+            None,
+            Some(1),
+        );
+        let first_generation = ws_state.snapshot_generation();
+
+        ws_state.apply_snapshot_text(
+            &snapshot_text("header two"),
+            TerminalState::Running,
+            None,
+            Some(2),
+        );
+        let second_generation = ws_state.snapshot_generation();
+
+        assert_eq!(first_generation, second_generation);
     }
 
     #[test]
@@ -2247,6 +2295,211 @@ pub(crate) mod tests {
         assert_eq!(session.updated_at_unix_ms, Some(99));
         assert!(session.output.contains("stale"));
         assert!(render_snapshot.terminal.output.contains("codex> refreshed"));
+    }
+
+    #[test]
+    fn active_daemon_sync_does_not_repaint_for_offscreen_scrollback_changes() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("stale", 0xffffff, 0x000000, None);
+        let snapshot_text = |header: &str| {
+            std::iter::once(format!("{header}\r\n"))
+                .chain((1..220).map(|index| format!("visible line {index:03}\r\n")))
+                .collect::<String>()
+        };
+
+        runtime.ws_state.apply_snapshot_text(
+            &snapshot_text("header one"),
+            TerminalState::Running,
+            None,
+            Some(1),
+        );
+        let first = runtime.sync(&mut session, true, None);
+        assert!(first.repaint);
+
+        runtime.ws_state.apply_snapshot_text(
+            &snapshot_text("header two"),
+            TerminalState::Running,
+            None,
+            Some(2),
+        );
+        let second = runtime.sync(&mut session, true, None);
+
+        assert!(!second.changed);
+        assert!(!second.repaint);
+        assert_eq!(session.updated_at_unix_ms, Some(2));
+    }
+
+    #[test]
+    fn resume_scroll_workload_never_replaces_visible_output_with_blank_snapshot() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("stale", 0xffffff, 0x000000, None);
+        runtime.ws_state.enter_interactive_output_window();
+
+        let mut saw_visible_snapshot = false;
+        for chunk in resume_scroll_workload() {
+            let _ = runtime.ws_state.apply_output_bytes(&chunk);
+            let _ = runtime.sync(&mut session, true, None);
+
+            let snapshot = runtime
+                .render_snapshot(&session)
+                .unwrap_or_else(|| panic!("expected active daemon render snapshot"));
+            let has_visible_content = terminal_snapshot_has_visible_content(&snapshot.terminal);
+            if saw_visible_snapshot {
+                assert!(
+                    has_visible_content,
+                    "resume workload should not blank a previously visible snapshot"
+                );
+            }
+            saw_visible_snapshot |= has_visible_content;
+        }
+
+        let final_snapshot = runtime
+            .render_snapshot(&session)
+            .unwrap_or_else(|| panic!("expected final resume render snapshot"));
+        assert!(
+            final_snapshot
+                .terminal
+                .output
+                .contains("resume transcript line 259")
+        );
+    }
+
+    #[test]
+    fn resume_scroll_workload_keeps_session_list_visible_until_resume_frame_lands() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("stale", 0xffffff, 0x000000, None);
+        runtime.ws_state.enter_interactive_output_window();
+
+        let workload = resume_scroll_workload();
+        let clear_index = workload
+            .iter()
+            .position(|chunk| chunk.as_slice() == b"\x1b[H\x1b[2J")
+            .unwrap_or_else(|| panic!("expected standalone clear chunk in resume workload"));
+
+        for chunk in &workload[..clear_index] {
+            let _ = runtime.ws_state.apply_output_bytes(chunk);
+            let _ = runtime.sync(&mut session, true, None);
+        }
+
+        let before_clear = runtime
+            .render_snapshot(&session)
+            .unwrap_or_else(|| panic!("expected pre-clear resume snapshot"));
+        assert!(
+            before_clear
+                .terminal
+                .output
+                .contains("Select a session to resume")
+        );
+
+        let _ = runtime.ws_state.apply_output_bytes(&workload[clear_index]);
+        let _ = runtime.sync(&mut session, true, None);
+
+        let held_snapshot = runtime
+            .render_snapshot(&session)
+            .unwrap_or_else(|| panic!("expected held snapshot across resume clear"));
+        assert!(
+            held_snapshot
+                .terminal
+                .output
+                .contains("Select a session to resume"),
+            "expected previous session list to remain visible until resume content lands: {:?}",
+            held_snapshot.terminal.output
+        );
+
+        for chunk in &workload[clear_index + 1..clear_index + 5] {
+            let _ = runtime.ws_state.apply_output_bytes(chunk);
+            let _ = runtime.sync(&mut session, true, None);
+        }
+
+        let resumed_snapshot = runtime
+            .render_snapshot(&session)
+            .unwrap_or_else(|| panic!("expected resumed transcript snapshot"));
+        assert!(
+            resumed_snapshot
+                .terminal
+                .output
+                .contains("Resuming session-007"),
+            "expected resume header to replace held session list: {:?}",
+            resumed_snapshot.terminal.output
+        );
+    }
+
+    fn resume_visible_signature(
+        runtime: &DaemonTerminalRuntime,
+        session: &TerminalSession,
+    ) -> Option<u64> {
+        let snapshot = runtime.render_snapshot(session)?;
+        let source =
+            terminal_render_source_for_snapshot(session.id, snapshot.state, &snapshot.terminal);
+        let line_count = terminal_render_line_count_for_source(&source, None);
+        let visible_end = line_count.max(1);
+        let visible_start = visible_end.saturating_sub(40);
+        Some(terminal_visible_render_signature_for_source(
+            &source,
+            visible_start..visible_end,
+        ))
+    }
+
+    #[test]
+    #[ignore = "benchmark helper; run with -- --ignored --nocapture"]
+    fn benchmark_resume_scroll_gui_feedback_loop() {
+        let iterations = 8;
+        let workload = resume_scroll_workload();
+        let mut apply_bytes = Duration::ZERO;
+        let mut sync = Duration::ZERO;
+        let mut render_signature = Duration::ZERO;
+
+        for _ in 0..iterations {
+            let runtime = daemon_runtime_for_test();
+            let mut session = session_with_styled_line("stale", 0xffffff, 0x000000, None);
+            runtime.ws_state.enter_interactive_output_window();
+
+            let mut last_signature = None;
+            let mut visible_updates = 0usize;
+
+            for chunk in &workload {
+                let started = Instant::now();
+                let _ = runtime.ws_state.apply_output_bytes(chunk);
+                apply_bytes += started.elapsed();
+
+                let started = Instant::now();
+                let _ = runtime.sync(&mut session, true, None);
+                sync += started.elapsed();
+
+                let started = Instant::now();
+                if let Some(signature) = resume_visible_signature(&runtime, &session)
+                    && last_signature != Some(signature)
+                {
+                    visible_updates += 1;
+                    last_signature = Some(signature);
+                }
+                render_signature += started.elapsed();
+            }
+
+            let final_snapshot = runtime
+                .render_snapshot(&session)
+                .unwrap_or_else(|| panic!("expected final resume render snapshot"));
+            assert!(
+                final_snapshot
+                    .terminal
+                    .output
+                    .contains("resume transcript line 259")
+            );
+            assert!(
+                visible_updates > 10,
+                "expected visible transcript to advance"
+            );
+        }
+
+        let total = apply_bytes + sync + render_signature;
+        println!("gui resume workload benchmark ({iterations} iterations)");
+        println!(
+            "apply_ms={:.2} sync_ms={:.2} visible_signature_ms={:.2} total_ms={:.2}",
+            apply_bytes.as_secs_f64() * 1000.0,
+            sync.as_secs_f64() * 1000.0,
+            render_signature.as_secs_f64() * 1000.0,
+            total.as_secs_f64() * 1000.0,
+        );
     }
 
     #[test]

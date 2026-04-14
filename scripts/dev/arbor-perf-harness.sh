@@ -12,7 +12,7 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/dev/arbor-perf-harness.sh build
-  scripts/dev/arbor-perf-harness.sh start [dashboard|df|hidden|prompt|redraw|scroll]
+  scripts/dev/arbor-perf-harness.sh start [dashboard|df|hidden|prompt|redraw|resume|scroll]
   scripts/dev/arbor-perf-harness.sh daemon
   scripts/dev/arbor-perf-harness.sh seed
   scripts/dev/arbor-perf-harness.sh gui
@@ -26,6 +26,7 @@ Modes:
   hidden  Rewrites a single visible line with carriage returns to mimic "thinking".
   prompt  Replays a Codex-style approval prompt with cursor-relative redraws.
   redraw  Repaints a full alternate-screen terminal frame to mimic resume/session-list redraws.
+  resume  Replays a long `/resume` burst that clears, restores, and then streams transcript lines.
   scroll  Continuously prints visible lines to stress scrolling throughput.
 EOF
 }
@@ -259,6 +260,52 @@ while true; do
   printf '| q to quit harness                                                                                                    |\n'
   printf '+----------------------------------------------------------------------------------------------------------------------+\n'
   sleep 0.04
+done
+EOF
+      ;;
+    resume)
+      cat >"$script_path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+cleanup() {
+  printf '\033[0m\033[?25h\033[?1049l'
+}
+trap cleanup EXIT INT TERM
+
+printf '\033[?1049h\033[2J\033[H\033[?25l'
+printf 'Select a session to resume\n\n'
+row=1
+while [[ "$row" -le 18 ]]; do
+  marker=' '
+  if [[ "$row" -eq 7 ]]; then
+    marker='›'
+  fi
+  printf '%s session-%03d  model=gpt-5.4  cwd=~/code/arbor  updated=%02ds ago\n' \
+    "$marker" "$row" $((row * 4))
+  row=$((row + 1))
+done
+sleep 0.6
+
+printf '\033[H\033[2J'
+printf 'Resuming session-007\n'
+printf 'restoring transcript...\n'
+printf 'reconnecting tools...\n'
+printf '\n'
+
+line=0
+while true; do
+  role_index=$((line % 4))
+  case "$role_index" in
+    0) role='system' ;;
+    1) role='user' ;;
+    2) role='assistant' ;;
+    *) role='tool' ;;
+  esac
+  printf '%9s %03d: resume transcript line %03d cwd=~/code/arbor tokens=%05d\n' \
+    "$role" "$line" "$line" $((10000 + line * 17))
+  line=$((line + 1))
+  sleep 0.015
 done
 EOF
       ;;

@@ -53,6 +53,9 @@ bench-embedded-terminal-engines: ghostty-vt-bridge
 bench-terminal-workloads:
     cargo +{{nightly_toolchain}} test -p arbor-terminal-emulator --test workload_benchmark -- --ignored --nocapture
 
+bench-gui-terminal-workloads:
+    cargo +{{nightly_toolchain}} test -p arbor-gui benchmark_resume_scroll_gui_feedback_loop -- --ignored --nocapture
+
 bench-embedded-terminal-codspeed: ghostty-vt-bridge
     RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}" cargo +{{nightly_toolchain}} bench -p arbor-benchmarks --features ghostty-vt-experimental --bench embedded_terminal
 

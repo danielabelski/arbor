@@ -2,6 +2,7 @@ mod alacritty_emulator;
 mod alacritty_support;
 #[cfg(feature = "ghostty-vt-experimental")]
 mod ghostty_vt_experimental;
+pub mod workloads;
 
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -37,7 +38,7 @@ pub const TERMINAL_ANSI_DIM_8: [u32; 8] = [
     0x3b3f4a, 0xa7545a, 0x6d8f59, 0xb8985b, 0x457cad, 0x8d54a0, 0x3c818a, 0x8f969b,
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TerminalSnapshot {
     pub output: String,
     pub styled_lines: Vec<TerminalStyledLine>,
@@ -57,25 +58,25 @@ impl TerminalProcessReport {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TerminalCursor {
     pub line: usize,
     pub column: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct TerminalModes {
     pub app_cursor: bool,
     pub alt_screen: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TerminalStyledLine {
     pub cells: Vec<TerminalStyledCell>,
     pub runs: Vec<TerminalStyledRun>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TerminalStyledCell {
     pub column: usize,
     pub text: String,
@@ -83,14 +84,17 @@ pub struct TerminalStyledCell {
     pub bg: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TerminalStyledRun {
     pub text: String,
     pub fg: u32,
     pub bg: u32,
 }
 
-pub use alacritty_support::process_terminal_bytes;
+pub use {
+    alacritty_support::process_terminal_bytes,
+    workloads::{prompt_redraw_workload, resume_scroll_workload, wide_scroll_workload},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TerminalEngineKind {

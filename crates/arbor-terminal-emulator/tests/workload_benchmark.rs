@@ -1,5 +1,8 @@
 use {
-    arbor_terminal_emulator::{TerminalEmulator, TerminalEngineKind},
+    arbor_terminal_emulator::{
+        TerminalEmulator, TerminalEngineKind, prompt_redraw_workload, resume_scroll_workload,
+        wide_scroll_workload,
+    },
     std::time::{Duration, Instant},
 };
 
@@ -14,6 +17,7 @@ struct BenchmarkResult {
 #[derive(Debug, Clone, Copy)]
 enum WorkloadKind {
     PromptRedraw,
+    ResumeScroll,
     WideScroll,
 }
 
@@ -21,6 +25,7 @@ impl WorkloadKind {
     fn label(self) -> &'static str {
         match self {
             Self::PromptRedraw => "prompt-redraw",
+            Self::ResumeScroll => "resume-scroll",
             Self::WideScroll => "wide-scroll",
         }
     }
@@ -40,7 +45,11 @@ fn benchmark_terminal_workloads() {
         "workload", "process_ms", "snapshot_ms", "snapshot_tail_ms", "render_ms", "total_ms"
     );
 
-    for workload in [WorkloadKind::PromptRedraw, WorkloadKind::WideScroll] {
+    for workload in [
+        WorkloadKind::PromptRedraw,
+        WorkloadKind::ResumeScroll,
+        WorkloadKind::WideScroll,
+    ] {
         let result = benchmark_workload(workload, iterations, rows, cols, tail_lines);
         print_result(workload.label(), result);
     }
@@ -120,6 +129,13 @@ fn assert_snapshot(
                 workload.label()
             );
         },
+        WorkloadKind::ResumeScroll => {
+            assert!(
+                output.contains("resume transcript line 259"),
+                "missing final resume line in {} output",
+                workload.label()
+            );
+        },
         WorkloadKind::WideScroll => {
             assert!(
                 output.contains("/Volumes/worktree-219"),
@@ -136,6 +152,13 @@ fn assert_rendered(workload: WorkloadKind, rendered: &str) {
             assert!(
                 rendered.contains("Would you like to make the following edits?"),
                 "missing prompt header in rendered {} output",
+                workload.label()
+            );
+        },
+        WorkloadKind::ResumeScroll => {
+            assert!(
+                rendered.contains("resume transcript line 259"),
+                "missing final resume line in rendered {} output",
                 workload.label()
             );
         },
@@ -164,78 +187,7 @@ fn print_result(name: &str, result: BenchmarkResult) {
 fn workload_chunks(workload: WorkloadKind) -> Vec<Vec<u8>> {
     match workload {
         WorkloadKind::PromptRedraw => prompt_redraw_workload(),
+        WorkloadKind::ResumeScroll => resume_scroll_workload(),
         WorkloadKind::WideScroll => wide_scroll_workload(),
     }
-}
-
-fn prompt_redraw_workload() -> Vec<Vec<u8>> {
-    let mut chunks = Vec::new();
-
-    for frame in 0..120 {
-        chunks.push(b"\x1b[H\x1b[2J".to_vec());
-        chunks.push(b"  Would you like to make the following edits?\r\n".to_vec());
-        chunks.push(b"\r\n".to_vec());
-        chunks.push(b"  crates/arbor-gui/src/app_init.rs (+4 -0)\r\n".to_vec());
-        chunks.push(
-            b"    223  -        self.terminal_scroll_handle: ScrollHandle::new(),\r\n".to_vec(),
-        );
-        chunks.push(b"    224  +        terminal_follow_output_until: None,\r\n".to_vec());
-        chunks.push(b"    225  +        last_terminal_scroll_offset_y: None,\r\n".to_vec());
-        chunks.push(b"\r\n".to_vec());
-        chunks.push(b"  1. Yes, proceed (y)\r\n".to_vec());
-        chunks.push(b"  2. Yes, and don't ask again for these files (a)\r\n".to_vec());
-        chunks.push(b"  3. No, and tell Codex what to do differently (esc)".to_vec());
-        chunks.push(b"\x1b[3A".to_vec());
-        match frame % 3 {
-            0 => {
-                chunks.push(b"\r\x1b[2K\xe2\x80\xba 1. Yes, proceed (y)\n".to_vec());
-                chunks
-                    .push(b"\r\x1b[2K  2. Yes, and don't ask again for these files (a)\n".to_vec());
-                chunks.push(
-                    b"\r\x1b[2K  3. No, and tell Codex what to do differently (esc)\n".to_vec(),
-                );
-            },
-            1 => {
-                chunks.push(b"\r\x1b[2K  1. Yes, proceed (y)\n".to_vec());
-                chunks.push(
-                    b"\r\x1b[2K\xe2\x80\xba 2. Yes, and don't ask again for these files (a)\n"
-                        .to_vec(),
-                );
-                chunks.push(
-                    b"\r\x1b[2K  3. No, and tell Codex what to do differently (esc)\n".to_vec(),
-                );
-            },
-            _ => {
-                chunks.push(b"\r\x1b[2K  1. Yes, proceed (y)\n".to_vec());
-                chunks
-                    .push(b"\r\x1b[2K  2. Yes, and don't ask again for these files (a)\n".to_vec());
-                chunks.push(
-                    b"\r\x1b[2K\xe2\x80\xba 3. No, and tell Codex what to do differently (esc)\n"
-                        .to_vec(),
-                );
-            },
-        }
-    }
-
-    chunks
-}
-
-fn wide_scroll_workload() -> Vec<Vec<u8>> {
-    let mut chunks = Vec::new();
-    chunks.push(b"\x1b[H\x1b[2J".to_vec());
-    chunks.push(b"Filesystem             Size   Used  Avail Capacity Mounted on\r\n".to_vec());
-
-    for row in 0..220 {
-        let used_gib = (row * 7) % 900 + 50;
-        let avail_gib = 1024 - used_gib;
-        let capacity = (used_gib * 100) / 1024;
-        chunks.push(
-            format!(
-                "/dev/disk{row:<3}         1.0Ti  {used_gib:>4}Gi  {avail_gib:>4}Gi    {capacity:>2}%   /Volumes/worktree-{row:03}\r\n"
-            )
-            .into_bytes(),
-        );
-    }
-
-    chunks
 }
