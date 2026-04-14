@@ -1358,32 +1358,6 @@ pub(crate) fn should_auto_follow_terminal_output(
     terminal_updated && should_follow_output
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TerminalScheduledFollowPassDecision {
-    pub(crate) perform_scroll: bool,
-    pub(crate) schedule_retry: bool,
-}
-
-pub(crate) fn terminal_scheduled_follow_pass_decision(
-    pass_index: usize,
-    max_passes: usize,
-    should_follow: bool,
-    should_scroll: bool,
-) -> TerminalScheduledFollowPassDecision {
-    if !should_follow || max_passes == 0 {
-        return TerminalScheduledFollowPassDecision {
-            perform_scroll: false,
-            schedule_retry: false,
-        };
-    }
-
-    let has_retry_budget = pass_index.saturating_add(1) < max_passes;
-    TerminalScheduledFollowPassDecision {
-        perform_scroll: should_scroll,
-        schedule_retry: has_retry_budget && (pass_index == 0 || should_scroll),
-    }
-}
-
 pub(crate) fn terminal_should_follow_output(
     is_near_bottom: bool,
     follow_lock_active: bool,
@@ -1401,6 +1375,32 @@ mod tests {
         crate::{daemon_runtime::session_with_styled_line, theme::ThemeKind},
         arbor_terminal_emulator::TerminalEmulator,
     };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TerminalScheduledFollowPassDecision {
+        perform_scroll: bool,
+        schedule_retry: bool,
+    }
+
+    fn terminal_scheduled_follow_pass_decision(
+        pass_index: usize,
+        max_passes: usize,
+        should_follow: bool,
+        should_scroll: bool,
+    ) -> TerminalScheduledFollowPassDecision {
+        if !should_follow || max_passes == 0 {
+            return TerminalScheduledFollowPassDecision {
+                perform_scroll: false,
+                schedule_retry: false,
+            };
+        }
+
+        let has_retry_budget = pass_index.saturating_add(1) < max_passes;
+        TerminalScheduledFollowPassDecision {
+            perform_scroll: should_scroll,
+            schedule_retry: has_retry_budget && (pass_index == 0 || should_scroll),
+        }
+    }
 
     #[test]
     fn cursor_is_painted_at_terminal_column_instead_of_line_end() {
