@@ -56,7 +56,7 @@ zeroconf           = "0.17"
 notify-rust        = "4"
 octocrab           = "0.49.5"
 portable-pty       = "0.9.0"
-rand               = "0.9"
+rand               = "0.10"
 rmcp               = { version = "1", features = ["server", "transport-io", "schemars"] }
 ropey              = "1.6.1"
 secrecy            = "0.10"
